@@ -1,0 +1,60 @@
+name: Deploy Gurukul to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Allow only one concurrent deployment, skipping runs queued between an
+# in-progress run and the latest queued run.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Build site
+        run: npm run build
+        env:
+          # Defaults derive from the GitHub repo context. Set repo
+          # secrets SITE_URL / SITE_BASE_URL to override (e.g. for a
+          # custom domain).
+          SITE_URL: ${{ secrets.SITE_URL || format('https://{0}.github.io', github.repository_owner) }}
+          SITE_BASE_URL: ${{ secrets.SITE_BASE_URL || format('/{0}/', github.event.repository.name) }}
+          GITHUB_ORG: ${{ github.repository_owner }}
+          GITHUB_REPO: ${{ github.event.repository.name }}
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: build
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

@@ -1,0 +1,60 @@
+{
+  "name": "gurukul",
+  "version": "0.1.0",
+  "private": true,
+  "description": "An evolving, AI-generated documentary of LLM research, with confidence tracking, open-problems capture, and a path from study journal to research proposal outline.",
+  "scripts": {
+    "docusaurus": "docusaurus",
+    "start": "docusaurus start",
+    "build": "docusaurus build",
+    "swizzle": "docusaurus swizzle",
+    "deploy": "docusaurus deploy",
+    "clear": "docusaurus clear",
+    "serve": "docusaurus serve",
+    "write-translations": "docusaurus write-translations",
+    "write-heading-ids": "docusaurus write-heading-ids",
+    "typecheck": "tsc",
+    "journey": "tsx scripts/journey.ts",
+    "journey:dry": "JOURNEY_DRY_RUN=1 tsx scripts/journey.ts",
+    "outline": "tsx scripts/outline-proposal.ts",
+    "smoke": "tsx scripts/smoke-test.ts"
+  },
+  "dependencies": {
+    "@docusaurus/core": "^3.6.3",
+    "@docusaurus/preset-classic": "^3.6.3",
+    "@docusaurus/theme-mermaid": "^3.6.3",
+    "@mdx-js/react": "^3.0.0",
+    "clsx": "^2.0.0",
+    "prism-react-renderer": "^2.3.0",
+    "react": "^18.0.0",
+    "react-dom": "^18.0.0"
+  },
+  "devDependencies": {
+    "@docusaurus/module-type-aliases": "^3.6.3",
+    "@docusaurus/tsconfig": "^3.6.3",
+    "@docusaurus/types": "^3.6.3",
+    "@types/node": "^22.0.0",
+    "@types/react": "^18.2.0",
+    "dotenv": "^16.4.5",
+    "prompts": "^2.4.2",
+    "@types/prompts": "^2.4.9",
+    "tsx": "^4.19.2",
+    "typescript": "~5.6.0",
+    "zod": "^3.23.8"
+  },
+  "browserslist": {
+    "production": [
+      ">0.5%",
+      "not dead",
+      "not op_mini all"
+    ],
+    "development": [
+      "last 3 chrome version",
+      "last 3 firefox version",
+      "last 5 safari version"
+    ]
+  },
+  "engines": {
+    "node": ">=20.0"
+  }
+}
