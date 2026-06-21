@@ -1,5 +1,5 @@
 import React from 'react';
-import {usePersistentState} from '@site/src/lib/storage';
+import {usePersistentState} from '@/lib/storage';
 
 export type ExperimentStep = {
   id: string;

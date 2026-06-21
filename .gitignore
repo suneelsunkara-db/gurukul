@@ -1,10 +1,18 @@
 # Dependencies
 node_modules/
 
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+
 # Production
 build/
-.docusaurus/
-.cache-loader/
+
+# MLflow local artifacts (tracking goes to Databricks)
+mlruns/
+mlflow.db
 
 # Misc
 .DS_Store

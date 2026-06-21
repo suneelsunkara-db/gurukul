@@ -1,58 +1,29 @@
 {
   "name": "gurukul",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "private": true,
-  "description": "An evolving, AI-generated documentary of LLM research, with confidence tracking, open-problems capture, and a path from study journal to research proposal outline.",
+  "type": "module",
+  "description": "A self-evolving knowledge graph for LLM research with Socratic assessment.",
   "scripts": {
-    "docusaurus": "docusaurus",
-    "start": "docusaurus start",
-    "build": "docusaurus build",
-    "swizzle": "docusaurus swizzle",
-    "deploy": "docusaurus deploy",
-    "clear": "docusaurus clear",
-    "serve": "docusaurus serve",
-    "write-translations": "docusaurus write-translations",
-    "write-heading-ids": "docusaurus write-heading-ids",
-    "typecheck": "tsc",
-    "journey": "tsx scripts/journey.ts",
-    "journey:dry": "JOURNEY_DRY_RUN=1 tsx scripts/journey.ts",
-    "outline": "tsx scripts/outline-proposal.ts",
-    "smoke": "tsx scripts/smoke-test.ts"
+    "start": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "agent-server": "uv run start-server",
+    "dev": "concurrently -n web,agents -c blue,magenta \"npm:start\" \"npm:agent-server\""
   },
   "dependencies": {
-    "@docusaurus/core": "^3.6.3",
-    "@docusaurus/preset-classic": "^3.6.3",
-    "@docusaurus/theme-mermaid": "^3.6.3",
-    "@mdx-js/react": "^3.0.0",
-    "clsx": "^2.0.0",
-    "prism-react-renderer": "^2.3.0",
+    "@xyflow/react": "^12.11.0",
     "react": "^18.0.0",
     "react-dom": "^18.0.0"
   },
   "devDependencies": {
-    "@docusaurus/module-type-aliases": "^3.6.3",
-    "@docusaurus/tsconfig": "^3.6.3",
-    "@docusaurus/types": "^3.6.3",
-    "@types/node": "^22.0.0",
+    "@types/node": "^20.19.43",
     "@types/react": "^18.2.0",
-    "dotenv": "^16.4.5",
-    "prompts": "^2.4.2",
-    "@types/prompts": "^2.4.9",
-    "tsx": "^4.19.2",
+    "@types/react-dom": "^18.2.0",
+    "@vitejs/plugin-react": "^4.3.0",
+    "concurrently": "^10.0.3",
     "typescript": "~5.6.0",
-    "zod": "^3.23.8"
-  },
-  "browserslist": {
-    "production": [
-      ">0.5%",
-      "not dead",
-      "not op_mini all"
-    ],
-    "development": [
-      "last 3 chrome version",
-      "last 3 firefox version",
-      "last 5 safari version"
-    ]
+    "vite": "^6.0.0"
   },
   "engines": {
     "node": ">=20.0"

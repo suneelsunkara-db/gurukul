@@ -1,0 +1,18 @@
+# Exclude npm files so Databricks Apps platform doesn't run npm ci
+node_modules/
+package.json
+package-lock.json
+.npmrc
+
+# Dev-only files
+.env
+.env.local
+.git/
+.vscode/
+.idea/
+.DS_Store
+*.log
+mlruns/
+mlflow.db
+.smoke-out/
+proposals/

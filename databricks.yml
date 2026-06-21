@@ -1,0 +1,71 @@
+bundle:
+  name: gurukul
+
+variables:
+  teacher_model:
+    description: "Serving endpoint for the Teacher agent"
+    default: "databricks-gpt-5-5"
+  student_model:
+    description: "Serving endpoint for the Student agent"
+    default: "databricks-claude-sonnet-4-6"
+  agent_concurrency:
+    description: "Max concurrent Student agents"
+    default: "4"
+  secret_scope:
+    description: "Databricks secret scope holding app secrets (e.g. Tavily key)"
+    default: "gurukul"
+  endpoint_name:
+    description: "Lakebase endpoint resource name"
+    default: "projects/gurukul-lakebase/branches/production/endpoints/primary"
+
+resources:
+  apps:
+    gurukul:
+      name: "gurukul"
+      description: "Self-evolving knowledge graph of LLM research"
+      source_code_path: ./
+      config:
+        command: ["uv", "run", "start-app"]
+        env:
+          - name: MLFLOW_TRACKING_URI
+            value: "databricks"
+          - name: ENDPOINT_NAME
+            value: ${var.endpoint_name}
+          - name: TEACHER_MODEL
+            value: ${var.teacher_model}
+          - name: STUDENT_MODEL
+            value: ${var.student_model}
+          - name: AGENT_CONCURRENCY
+            value: ${var.agent_concurrency}
+          - name: TAVILY_API_KEY
+            valueFrom: "tavily-api-key"
+          - name: LOG_LEVEL
+            value: "INFO"
+
+      resources:
+        - name: "postgres"
+          postgres:
+            branch: "projects/gurukul-lakebase/branches/production"
+            database: "projects/gurukul-lakebase/branches/production/databases/databricks-postgres"
+            permission: "CAN_CONNECT_AND_CREATE"
+        - name: "teacher_llm"
+          serving_endpoint:
+            name: ${var.teacher_model}
+            permission: "CAN_QUERY"
+        - name: "student_llm"
+          serving_endpoint:
+            name: ${var.student_model}
+            permission: "CAN_QUERY"
+        - name: "tavily-api-key"
+          secret:
+            scope: ${var.secret_scope}
+            key: "tavily_api_key"
+            permission: "READ"
+
+targets:
+  prod:
+    mode: production
+    default: true
+    workspace:
+      host: https://fe-vm-vdm-classic-rcn6ip.cloud.databricks.com
+      root_path: /Workspace/Users/suneel.sunkara@databricks.com/.bundle/${bundle.name}/${bundle.target}
