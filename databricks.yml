@@ -22,7 +22,7 @@ resources:
   apps:
     gurukul:
       name: "gurukul"
-      description: "Self-evolving knowledge graph of LLM research"
+      description: "Mentorship-Driven Learning for AI Researchers"
       source_code_path: ./
       config:
         command: ["uv", "run", "start-app"]

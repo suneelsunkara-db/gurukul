@@ -1,6 +1,6 @@
 # PRD: Socratic Assessment & Research Readiness Engine
 
-**Product**: Gurukul — Self-Evolving Knowledge Graph for LLM Research  
+**Product**: Gurukul — Mentorship-Driven Learning for AI Researchers  
 **Version**: v3.0  
 **Author**: Suneel Sunkara  
 **Status**: Draft  

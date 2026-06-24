@@ -415,7 +415,7 @@ export default function ExplorePage() {
           {rightView === 'welcome' && !hasTopics && !exploring && (
             <div className="gk-welcome">
               <h1>Gurukul</h1>
-              <p className="gk-welcome__sub">A self-evolving knowledge graph of LLM research</p>
+              <p className="gk-welcome__sub">Mentorship-Driven Learning for AI Researchers</p>
               <p className="gk-welcome__desc">
                 Type a seed topic and the Teacher maps the knowledge landscape — concepts,
                 architectures, training recipes, and model families — organized by category

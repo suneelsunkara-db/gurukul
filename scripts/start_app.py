@@ -157,7 +157,7 @@ def step_start_server() -> None:
 
 def main() -> None:
     _log("=" * 50)
-    _log("Gurukul - Self-evolving LLM Research Knowledge Graph")
+    _log("Gurukul - Mentorship-Driven Learning for AI Researchers")
     _log("=" * 50)
 
     step_load_env()

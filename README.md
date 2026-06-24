@@ -1,6 +1,6 @@
 # Gurukul
 
-A self-evolving knowledge graph for LLM research, powered by Teacher/Student agents on Databricks.
+Mentorship-Driven Learning for AI Researchers, powered by Teacher/Student agents on Databricks.
 
 Gurukul (Sanskrit for "place of learning") is an interactive research exploration platform that helps you deeply understand LLM concepts — from transformers and attention to frontier model architectures — and guides you toward publishing your own research paper.
 

@@ -1,7 +1,7 @@
 [project]
 name = "gurukul"
 version = "0.1.0"
-description = "A self-evolving knowledge graph of LLM research, powered by Teacher/Student agents on Databricks"
+description = "Mentorship-Driven Learning for AI Researchers, powered by Teacher/Student agents on Databricks"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [

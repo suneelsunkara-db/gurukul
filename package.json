@@ -3,7 +3,7 @@
   "version": "0.3.0",
   "private": true,
   "type": "module",
-  "description": "A self-evolving knowledge graph for LLM research with Socratic assessment.",
+  "description": "Mentorship-Driven Learning for AI Researchers with Socratic assessment.",
   "scripts": {
     "start": "vite",
     "build": "tsc --noEmit && vite build",
