@@ -391,7 +391,17 @@ COMPREHENSIVENESS anchors:
 - Score 55: covers the main idea and one trade-off, but misses alternatives or limitations.
 - Score 85: covers mechanism, trade-offs, competing approaches, AND limitations/open problems.
 
-Use these anchors as fixed reference points. If content matches the 25-anchor pattern, score near 25 even if it is well-written prose. Polish is not depth.
+RESEARCH_READINESS anchors:
+- Score 25: no references and no open problems; reader cannot position this in the literature or find a gap.
+- Score 55: has references but does not articulate what is unsolved or where the open questions are.
+- Score 85: cites real work, explicitly names open problems/gaps, and points toward concrete directions.
+
+HARD CEILINGS (signal-tied — apply BEFORE narrative judgement; a polished essay does not earn an exemption):
+- DEPTH: if there is NO code/math gist AND no key_aspect body explains a mechanism (the content only states WHAT happens, not WHY/HOW), Technical Depth MUST be ≤ 30. If mechanisms are explained in prose but there is no math/code and no failure modes/trade-offs, cap at ≤ 55.
+- COMPREHENSIVENESS: if there is only ONE key_aspect, or no trade-offs/limitations are discussed anywhere, cap at ≤ 35.
+- RESEARCH_READINESS: if there are zero references AND zero open_problems, cap at ≤ 30. If references exist but no open problems/gaps are named, cap at ≤ 55.
+
+Use these anchors and ceilings as fixed reference points. If content matches the 25-anchor pattern, score near 25 even if it is well-written prose. Polish is not depth.
 
 Be a TOUGH but FAIR evaluator. Do not give 90+ unless the content is genuinely excellent. Most LLM-generated content lands in the 60-80 range. Inflating scores defeats the purpose of evaluation."""
 

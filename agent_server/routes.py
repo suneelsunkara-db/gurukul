@@ -1139,17 +1139,51 @@ async def _score_llm_judge(title: str, payload: dict) -> dict[str, tuple[float |
 
     client = AsyncDatabricksOpenAI()
 
-    trimmed = {
-        "summary": (payload.get("summary") or "")[:500],
-        "key_aspects": payload.get("key_aspects", [])[:4],
-        "open_problems": payload.get("open_problems", [])[:3],
-        "takeaway": (payload.get("takeaway") or "")[:300],
-        "references": [
-            {"title": r.get("title", ""), "authors": r.get("authors", ""), "year": r.get("year")}
-            for r in payload.get("references", [])[:5]
+    # The judge must evaluate the SAME content the reader sees — not a
+    # truncated proxy. Earlier this view dropped gists/connections and capped
+    # the serialized JSON at 5k chars, which routinely chopped off the tail
+    # fields (open_problems, references) entirely. That made the judge blind to
+    # the very signals depth/comprehensiveness/research-readiness measure. A
+    # single topic is a few thousand tokens — far below the model's context —
+    # so there is no cost/context reason to trim. We include every dimension-
+    # relevant field and guard only against pathological size.
+    content_view = {
+        "summary": payload.get("summary") or "",
+        "eli5": payload.get("eli5") or "",
+        "takeaway": payload.get("takeaway") or "",
+        "key_aspects": [
+            {
+                "title": a.get("title", ""),
+                "intuition": a.get("intuition", ""),
+                "body": a.get("body", ""),
+            }
+            for a in payload.get("key_aspects", []) if isinstance(a, dict)
         ],
+        "gists": [
+            {"caption": g.get("caption", ""), "body": g.get("body", "")}
+            for g in payload.get("gists", []) if isinstance(g, dict)
+        ],
+        "open_problems": [
+            {"question": o.get("question", ""), "why": o.get("why", "")}
+            for o in payload.get("open_problems", []) if isinstance(o, dict)
+        ],
+        "references": [
+            {
+                "title": r.get("title", ""),
+                "authors": r.get("authors", ""),
+                "year": r.get("year"),
+                "arxiv": r.get("arxiv"),
+            }
+            for r in payload.get("references", []) if isinstance(r, dict)
+        ],
+        "connections": payload.get("connections", []),
+        "experiment": payload.get("experiment", {}),
     }
-    content_text = json.dumps(trimmed, indent=2)[:5000]
+    mc = payload.get("model_comparison")
+    if mc:
+        content_view["model_comparison"] = mc
+    # Safety bound only (≈ 10k tokens), never a content cut for normal topics.
+    content_text = json.dumps(content_view, indent=2)[:40000]
     model = os.environ.get("TEACHER_MODEL", "databricks-claude-sonnet-4-6")
     user_msg = (
         f"Topic: {title}\n\nContent:\n{content_text}\n\n"
@@ -1370,7 +1404,7 @@ def _ablate_payload(payload: dict, dim_key: str) -> dict:
     return p
 
 
-async def run_calibration(sample_size: int = 3) -> dict:
+async def run_calibration(sample_size: int = 5) -> dict:
     """Run the ablation self-test across a sample of topics and persist results."""
     import asyncio as _aio
 
@@ -1452,7 +1486,7 @@ async def run_calibration(sample_size: int = 3) -> dict:
 @router.post("/eval/calibrate")
 async def calibrate_judge(body: dict | None = None):
     """Run the ablation self-test to validate the judge's discriminative power."""
-    sample_size = int((body or {}).get("sample_size", 3))
+    sample_size = int((body or {}).get("sample_size", 5))
     return await run_calibration(sample_size=max(1, min(sample_size, 10)))
 
 
