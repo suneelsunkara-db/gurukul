@@ -35,7 +35,7 @@ echo "  ╚═══════════════════════
 echo -e "${NC}"
 
 # ─── 1. Prerequisites ───────────────────────────────────────────────
-step "1/7  Checking prerequisites"
+step "1/8  Checking prerequisites"
 
 command -v node >/dev/null 2>&1 || err "Node.js not found. Install Node 20+"
 ok "Node.js $(node -v)"
@@ -47,7 +47,7 @@ command -v databricks >/dev/null 2>&1 || err "Databricks CLI not found"
 ok "Databricks CLI $(databricks --version 2>&1 | head -1)"
 
 # ─── 2. Load config & authenticate ──────────────────────────────────
-step "2/7  Loading config and authenticating"
+step "2/8  Loading config and authenticating"
 
 if [ -f .env ]; then
     set -a; source .env; set +a
@@ -69,7 +69,7 @@ fi
 ok "Authenticated"
 
 # ─── 3. Build frontend locally ──────────────────────────────────────
-step "3/7  Building frontend"
+step "3/8  Building frontend"
 
 npm ci --silent 2>&1
 rm -rf build/

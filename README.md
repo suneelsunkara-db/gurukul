@@ -48,8 +48,8 @@ The end goal: go from "What is ReAct?" to a NeurIPS-ready paper outline, with ev
 │  │ Eval Engine│  │ arXiv API  │  │ Tavily Web │                 │
 │  │ (Heuristic │  │ (Paper     │  │ Search     │                 │
 │  │ + LLM      │  │ Verify +   │  │ (Real-time │                 │
-│  │   Judge)   │  │ Discovery) │  │  Model     │                 │
-│  │            │  │            │  │  Specs)    │                 │
+│  │   Judge +  │  │ Discovery) │  │  Model     │                 │
+│  │ Calibrate) │  │            │  │  Specs)    │                 │
 │  └────────────┘  └────────────┘  └────────────┘                 │
 └──────────────────────────┬──────────────────────────────────────┘
                            │
@@ -63,6 +63,7 @@ The end goal: go from "What is ReAct?" to a NeurIPS-ready paper outline, with ev
               │  • MCQ questions/answers│
               │  • eval runs & actions  │
               │  • quality learnings    │
+              │  • judge calibration    │
               │  • misconceptions       │
               └─────────────────────────┘
 ```
@@ -86,15 +87,25 @@ The end goal: go from "What is ReAct?" to a NeurIPS-ready paper outline, with ev
 
 ### Evaluation Dimensions
 
-The eval engine scores every generated topic across 5 dimensions:
+The eval engine scores every generated topic across **8 dimensions** — 4 cheap heuristics and 4 LLM-as-a-Judge dimensions:
 
 | Dimension | Method | What it measures |
 |-----------|--------|-----------------|
-| Epistemic Markers | Heuristic (regex + density) | Does content distinguish established facts from speculation? |
-| Grounding | Heuristic (attribution check) | Are claims attributed to sources? |
-| References | Heuristic + arXiv verification | Are citations real and verifiable? |
-| Structure & Depth | Heuristic (field completeness, word count) | Is content deep enough for research use? |
-| Research Quality | LLM-as-a-Judge (Teacher model) | Factual accuracy, comprehensiveness, research readiness |
+| Grounding | Heuristic (attribution check) | Are claims attributed to sources and properly hedged? |
+| References | Heuristic + arXiv verification | Are citations real, complete, and sufficient? |
+| Structure | Heuristic (field completeness) | Is content structurally complete with all required fields? |
+| Epistemic Markers | Heuristic (regex + density) | Does content signal confidence levels for claims? |
+| Factual Accuracy | LLM-as-a-Judge (Teacher model) | Are claims verifiable and correct against known literature? |
+| Comprehensiveness | LLM-as-a-Judge | Does it cover all key aspects, trade-offs, and limitations? |
+| Technical Depth | LLM-as-a-Judge | Does it explain mechanisms (why, not just what), edge cases, failure modes? |
+| Research Readiness | LLM-as-a-Judge | Could someone write a related-works section or identify gaps from this? |
+
+The judge is hardened against noise:
+
+- **Strict structured outputs** — every judge (and generator) call is constrained by a JSON schema (`agent_server/schemas.py`), so responses are always valid, complete JSON with all dimensions present. No omitted keys, prose-wrapping, or mid-JSON truncation.
+- **Self-consistency** — each dimension is sampled `JUDGE_SAMPLES` times (default 3) and the **median** is taken to damp judge variance. A failed dimension scores `None`, never a silent fallback.
+- **Ablation self-test (calibration)** — `/eval/calibrate` deliberately degrades content per dimension and re-judges it; a dimension is only trusted ("calibrated") if its score drops by a threshold. Results persist in the `judge_calibration` table.
+- **Learning gate** — the improvement loop only persists a learning for a dimension when the judge is calibrated for it *and* the measured delta is positive, so the system never learns from an uncalibrated signal.
 
 ## Project Structure
 
@@ -106,6 +117,7 @@ gurukul/
 │   ├── routes.py           # REST + SSE API endpoints
 │   ├── db.py               # Lakebase (Postgres) data layer
 │   ├── prompts.py          # System prompts for all agents
+│   ├── schemas.py          # Strict JSON schemas for structured LLM outputs
 │   ├── arxiv.py            # arXiv API client (search, verify, batch)
 │   ├── web_search.py       # Tavily web search for real-time model specs
 │   ├── guardrails.py       # Post-generation content validation
@@ -116,7 +128,8 @@ gurukul/
 │   ├── scorers.py          # MLflow GenAI custom scorers
 │   └── datasets.py         # Eval dataset builders
 ├── scripts/
-│   └── start_app.py        # Unified entry point (local + Databricks Apps)
+│   ├── start_app.py        # Unified entry point (local + Databricks Apps)
+│   └── schema.sql          # Reference SQL schema for Lakebase tables
 ├── src/                    # React frontend
 │   ├── pages/index.tsx     # Main page (SSE, routing, state)
 │   ├── components/         # 14 UI components
@@ -225,27 +238,34 @@ chmod +x setup.sh
 
 ```bash
 chmod +x deploy.sh
-./deploy.sh          # Deploy to dev target
-./deploy.sh prod     # Deploy to prod target
-./deploy.sh dev --dry # Validate only
+./deploy.sh          # Build + deploy to Databricks Apps
+./deploy.sh --dry    # Build + validate only, don't deploy
 ```
 
-The deploy script handles everything:
+The deploy script is zero-touch and handles everything in 8 steps:
 1. Validates prerequisites (node, npm, uv, databricks CLI)
-2. Loads `.env` configuration
-3. Authenticates via Databricks CLI OAuth
-4. Installs Python + Node.js dependencies
-5. Builds the Vite frontend into `build/`
-6. Validates the Databricks Asset Bundle
-7. Deploys and starts the app, prints the live URL
+2. Loads `.env` and authenticates via Databricks CLI OAuth (launches login if needed)
+3. Builds the Vite frontend locally into `build/` (no npm runs on the platform)
+4. Sets up the Lakebase schema and grants permissions to all roles
+5. Creates the `gurukul` secret scope, stores `TAVILY_API_KEY`, and attaches all app resources (Postgres, Teacher/Student serving endpoints, secret)
+6. Uploads the staged source + pre-built frontend to the workspace
+7. Deploys the app via `databricks apps deploy`
+8. Prints the live app URL
 
-### Manual deployment
+### Manual deployment (Databricks Asset Bundle)
+
+`databricks.yml` defines a single `prod` target (the default). The Tavily key is read from a secret scope, never passed inline:
 
 ```bash
 uv sync && npm ci
 npm run build
-databricks bundle validate -t dev
-databricks bundle deploy -t dev -var="tavily_api_key=$TAVILY_API_KEY"
+
+# one-time: create the secret scope the app references via valueFrom
+databricks secrets create-scope gurukul
+databricks secrets put-secret gurukul tavily_api_key --string-value "$TAVILY_API_KEY"
+
+databricks bundle validate
+databricks bundle deploy
 databricks apps start gurukul
 ```
 
@@ -264,15 +284,17 @@ databricks apps stop gurukul       # Stop the app
 | Package | Purpose |
 |---------|---------|
 | `fastapi` + `uvicorn` | Web framework and ASGI server |
-| `databricks-openai` | Databricks-native OpenAI client with unified auth |
+| `databricks-openai[memory]` | Databricks-native OpenAI client with unified auth |
 | `databricks-sdk` | Workspace API, Lakebase OAuth token generation |
-| `databricks-agents` + `databricks-ai-bridge` | Agent framework integration |
+| `databricks-agents` + `databricks-ai-bridge[agent-server]` | Agent framework integration |
 | `mlflow >= 3.10` | Experiment tracking, GenAI evaluation, agent server |
 | `openai-agents` | OpenAI Agents SDK for Teacher/Student/Examiner orchestration |
 | `psycopg[binary,pool]` | PostgreSQL adapter with connection pooling (for Lakebase) |
 | `httpx` | Async HTTP client for arXiv API and Tavily web search |
 | `sse-starlette` | Server-Sent Events for real-time UI updates |
 | `python-dotenv` | Environment variable loading |
+| `uuid-utils` | Fast UUID generation for topic/session IDs |
+| `opentelemetry-exporter-otlp-proto-grpc` | OTLP trace export for MLflow tracing |
 
 ### Node.js (managed by npm)
 
@@ -297,6 +319,8 @@ databricks apps stop gurukul       # Stop the app
 | `ENDPOINT_NAME` | Yes | `.env` + `databricks.yml` | Lakebase endpoint resource path |
 | `TAVILY_API_KEY` | Optional | `.env` + `databricks.yml` | Tavily API key for web search grounding |
 | `AGENT_CONCURRENCY` | Optional | `.env` + `databricks.yml` | Max concurrent Student agents (default: 4) |
+| `JUDGE_SAMPLES` | Optional | `.env` | LLM-judge samples per dimension for self-consistency (default: 3) |
+| `MLFLOW_TRACKING_URI` | Optional | `databricks.yml` | MLflow tracking backend (set to `databricks` when deployed) |
 | `LOG_LEVEL` | Optional | `databricks.yml` | Logging level (default: INFO) |
 
 ## How It Works
@@ -305,8 +329,8 @@ databricks apps stop gurukul       # Stop the app
 2. **Learn** — Click any topic to read the Student-generated content: summaries, key aspects, experiments, references, and open problems.
 3. **Visualize** — Switch to the Mind Map view to see how topics connect.
 4. **Challenge** — Take MCQ quizzes or start Socratic assessment to test your understanding.
-5. **Evaluate** — Open the Eval Dashboard to see quality scores across 5 dimensions. Click Re-evaluate to run the full eval pipeline.
-6. **Improve** — Click Apply Fix to regenerate weak topics with targeted quality hints. Track improvement over time.
+5. **Evaluate** — Open the Eval Dashboard to see quality scores across 8 dimensions, plus the judge's calibration status. Click Re-evaluate to run the full eval pipeline, or Run self-test to calibrate the judge.
+6. **Improve** — Click Apply Fix to regenerate weak topics with targeted quality hints. Learnings are only kept for calibrated dimensions with positive deltas, so improvement is tracked against a trusted signal.
 7. **Research** — Once you've mastered topics, open the Research Panel to discover research directions and generate paper scaffolds.
 
 ## License
