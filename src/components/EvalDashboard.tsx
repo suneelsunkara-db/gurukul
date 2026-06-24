@@ -19,9 +19,17 @@ interface TopicScore {
   category: string;
   overall: number;
   verdict: 'strong' | 'moderate' | 'weak';
-  dimensions: Record<string, number>;
+  dimensions: Record<string, number | null>;
   suggestion_count: number;
   top_suggestion: string | null;
+}
+
+interface CalibrationDim {
+  label: string;
+  discriminative_power: number;
+  calibrated: boolean;
+  sample_size: number;
+  updated_at: string | null;
 }
 
 interface Insight {
@@ -77,11 +85,15 @@ interface TopicDelta {
   title: string;
   before: number;
   after: number;
-  overall: number;
-  grounding: number;
-  epistemic: number;
-  references: number;
-  structure: number;
+  overall: number | null;
+  grounding?: number | null;
+  epistemic?: number | null;
+  references?: number | null;
+  structure?: number | null;
+  depth?: number | null;
+  factual_accuracy?: number | null;
+  comprehensiveness?: number | null;
+  research_readiness?: number | null;
 }
 
 interface EvalAction {
@@ -134,7 +146,10 @@ function verdictLabel(overall: number): { text: string; color: string; research:
   return {text: 'Weak', color: '#ef4444', research: 'Draft quality only. Regenerate before relying on this content.'};
 }
 
-function delta(n: number) { return n > 0 ? `+${n}` : `${n}`; }
+function delta(n: number | null | undefined) {
+  if (n == null) return '–';
+  return n > 0 ? `+${n}` : `${n}`;
+}
 
 function relTime(iso: string) {
   const mins = Math.round((Date.now() - new Date(iso).getTime()) / 60000);
@@ -156,6 +171,8 @@ export default function EvalDashboard({onSelectTopic}: Props) {
   const [evaluating, setEvaluating] = useState(false);
   const [applyingDim, setApplyingDim] = useState<string | null>(null);
   const [reviewingId, setReviewingId] = useState<number | null>(null);
+  const [calibration, setCalibration] = useState<Record<string, CalibrationDim>>({});
+  const [calibrating, setCalibrating] = useState(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   /* ── helpers ── */
@@ -176,6 +193,30 @@ export default function EvalDashboard({onSelectTopic}: Props) {
     const r = await fetch('/api/eval/history');
     if (r.ok) setHistory((await r.json()).runs || []);
   }, []);
+
+  const loadCalibration = useCallback(async () => {
+    try {
+      const r = await fetch('/api/eval/calibration');
+      if (r.ok) setCalibration((await r.json()).calibration || {});
+    } catch {}
+  }, []);
+
+  const calibrate = useCallback(async () => {
+    setCalibrating(true);
+    try {
+      const r = await fetch('/api/eval/calibrate', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({sample_size: 3}),
+      });
+      if (r.ok) {
+        const d = await r.json();
+        if (d.dimensions) setCalibration(d.dimensions);
+      }
+      await loadCalibration();
+    } catch {}
+    setCalibrating(false);
+  }, [loadCalibration]);
 
   /* Load latest eval snapshot on mount (no new run created) */
   const loadLatest = useCallback(async () => {
@@ -214,7 +255,8 @@ export default function EvalDashboard({onSelectTopic}: Props) {
   useEffect(() => {
     setLoading(true);
     loadLatest().then(() => setLoading(false));
-  }, [loadLatest]);
+    loadCalibration();
+  }, [loadLatest, loadCalibration]);
 
   /* SSE: listen for live eval_action + status events */
   useEffect(() => {
@@ -445,6 +487,50 @@ export default function EvalDashboard({onSelectTopic}: Props) {
       </section>
 
       {/* ═══════════════════════════════════════════════════════════════
+          SECTION 2.5: Judge Calibration (ablation self-test)
+          ═══════════════════════════════════════════════════════════════ */}
+      <section className="ev-calib">
+        <div className="ev-calib__head">
+          <h3 className="ev-section-title" style={{margin: 0}}>Judge Calibration</h3>
+          <button type="button" className="ev-health__refresh"
+            onClick={calibrate} disabled={calibrating}>
+            {calibrating ? 'Running self-test…' : '⚗ Run self-test'}
+          </button>
+        </div>
+        <p className="ev-calib__intro">
+          Validates the LLM judge without human labels: good content is deliberately degraded along each
+          dimension, then re-judged. If the score doesn&apos;t drop, the judge is blind to that dimension —
+          so the feedback loop <strong>refuses to save learnings</strong> for it.
+        </p>
+        <div className="ev-calib__grid">
+          {['depth', 'factual_accuracy', 'comprehensiveness', 'research_readiness'].map((dk) => {
+            const c = calibration[dk];
+            const meta = DIM_META[dk];
+            const tested = c && c.sample_size > 0;
+            const ok = c?.calibrated;
+            return (
+              <div key={dk} className="ev-calib__card"
+                style={{borderColor: !tested ? 'var(--gk-card-border)' : ok ? '#10b981' : '#ef4444'}}>
+                <div className="ev-calib__card-head">
+                  <span>{meta.icon} {meta.label}</span>
+                  <span className="ev-calib__status" style={{
+                    color: !tested ? 'var(--gk-muted)' : ok ? '#10b981' : '#ef4444',
+                  }}>
+                    {!tested ? 'untested' : ok ? '✓ calibrated' : '✗ blind'}
+                  </span>
+                </div>
+                <div className="ev-calib__power">
+                  {tested
+                    ? <>score drops <strong>{c.discriminative_power}</strong> pts when ablated <small>(n={c.sample_size})</small></>
+                    : <span style={{color: 'var(--gk-muted)'}}>Run the self-test to validate.</span>}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </section>
+
+      {/* ═══════════════════════════════════════════════════════════════
           SECTION 3: What This Means (Insights)
           ═══════════════════════════════════════════════════════════════ */}
       {insights.length > 0 && (
@@ -476,12 +562,15 @@ export default function EvalDashboard({onSelectTopic}: Props) {
               </span>
               <span className="ev-heatmap__cell-title">{t.title}</span>
               <div className="ev-heatmap__cell-bars">
-                {DIM_KEYS.filter((dk) => (t.dimensions[dk] ?? 0) > 0).map((dk) => (
-                  <div key={dk} className="ev-heatmap__mini-bar" title={`${DIM_META[dk].label}: ${t.dimensions[dk]}%`}>
-                    <div className="ev-heatmap__mini-fill"
-                      style={{width: `${t.dimensions[dk]}%`, background: scoreColor(t.dimensions[dk])}} />
-                  </div>
-                ))}
+                {DIM_KEYS.filter((dk) => (t.dimensions[dk] ?? 0) > 0).map((dk) => {
+                  const dv = t.dimensions[dk] ?? 0;
+                  return (
+                    <div key={dk} className="ev-heatmap__mini-bar" title={`${DIM_META[dk].label}: ${dv}%`}>
+                      <div className="ev-heatmap__mini-fill"
+                        style={{width: `${dv}%`, background: scoreColor(dv)}} />
+                    </div>
+                  );
+                })}
               </div>
               {t.suggestion_count > 0 && (
                 <span className="ev-heatmap__badge">{t.suggestion_count}</span>
@@ -642,7 +731,7 @@ export default function EvalDashboard({onSelectTopic}: Props) {
                         <div className="ev-action-result__preview">
                           {Object.values(act.delta).slice(0, 4).map((d, k) => (
                             <span key={k} className="ev-action-result__chip"
-                              style={{color: d.overall > 0 ? '#10b981' : d.overall < 0 ? '#ef4444' : '#6b7280'}}>
+                              style={{color: (d.overall ?? 0) > 0 ? '#10b981' : (d.overall ?? 0) < 0 ? '#ef4444' : '#6b7280'}}>
                               {d.title?.slice(0, 20)}: {delta(d.overall)}
                             </span>
                           ))}
@@ -675,7 +764,7 @@ export default function EvalDashboard({onSelectTopic}: Props) {
                                   <span className="ev-review__arrow">→</span>
                                   <span style={{color: scoreColor(d.after), fontWeight: 700}}>{d.after}</span>
                                   <span style={{
-                                    color: d.overall > 0 ? '#10b981' : d.overall < 0 ? '#ef4444' : '#6b7280',
+                                    color: (d.overall ?? 0) > 0 ? '#10b981' : (d.overall ?? 0) < 0 ? '#ef4444' : '#6b7280',
                                     fontSize: '0.65rem', fontWeight: 600,
                                   }}>
                                     ({delta(d.overall)})

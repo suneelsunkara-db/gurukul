@@ -379,6 +379,20 @@ Return STRICT JSON:
   "research_readiness": { "score": <int 0-100>, "reasoning": "<1-2 sentences>", "missing_for_research": ["<what's needed>"] }
 }
 
+CALIBRATION ANCHORS (pin your scale to these — do not drift):
+
+DEPTH anchors:
+- Score 25: "Attention lets the model focus on relevant words. It improves performance on long sequences." (states WHAT, no mechanism, no math, no failure modes)
+- Score 55: "Attention computes weighted sums over tokens using query-key similarity. Transformers use it instead of recurrence, which helps with long-range dependencies." (names the mechanism but no math, no trade-offs, no failure modes)
+- Score 85: "Attention computes softmax(QK^T/sqrt(d_k))V; the sqrt(d_k) scaling keeps dot products out of softmax saturation where gradients vanish. The O(n^2) cost is the core bottleneck — linear-attention variants trade expressiveness for efficiency and degrade on tasks needing precise token comparisons." (mechanism + math + trade-off + failure mode)
+
+COMPREHENSIVENESS anchors:
+- Score 25: covers only the core definition; no trade-offs, no alternatives, no limitations.
+- Score 55: covers the main idea and one trade-off, but misses alternatives or limitations.
+- Score 85: covers mechanism, trade-offs, competing approaches, AND limitations/open problems.
+
+Use these anchors as fixed reference points. If content matches the 25-anchor pattern, score near 25 even if it is well-written prose. Polish is not depth.
+
 Be a TOUGH but FAIR evaluator. Do not give 90+ unless the content is genuinely excellent. Most LLM-generated content lands in the 60-80 range. Inflating scores defeats the purpose of evaluation."""
 
 

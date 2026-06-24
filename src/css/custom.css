@@ -1240,6 +1240,22 @@ h1, h2, h3 { margin: 0 0 0.5rem; }
 .gk-challenge__mcq-opt-text {
   flex: 1;
 }
+/* TESTING AID — MCQ answer hint (remove with the dev hint feature) */
+.gk-challenge__mcq-hint-badge {
+  font-size: 0.62rem; font-weight: 700; color: #10b981;
+  background: rgba(16, 185, 129, 0.12); padding: 0.1rem 0.4rem;
+  border-radius: 999px; text-transform: uppercase; letter-spacing: 0.04em;
+}
+.gk-challenge__hint-toggle {
+  align-self: flex-start; margin: -0.25rem 0 0.75rem;
+  background: transparent; border: 1px dashed var(--gk-card-border);
+  color: var(--gk-muted); font-size: 0.7rem; font-family: inherit;
+  padding: 0.3rem 0.6rem; border-radius: 6px; cursor: pointer;
+  transition: all 0.12s ease;
+}
+.gk-challenge__hint-toggle:hover {
+  color: #10b981; border-color: #10b981;
+}
 .gk-challenge__mcq-feedback {
   padding: 0.75rem; border-radius: 8px; margin-bottom: 1rem; font-size: 0.82rem; line-height: 1.5;
 }
@@ -1689,6 +1705,61 @@ h1, h2, h3 { margin: 0 0 0.5rem; }
 
 .ev-health__refresh:hover:not(:disabled) { background: var(--gk-accent); color: #fff; }
 .ev-health__refresh:disabled { opacity: 0.4; cursor: default; }
+
+/* ── Judge Calibration ── */
+
+.ev-calib { margin-bottom: 1.5rem; }
+
+.ev-calib__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.ev-calib__intro {
+  font-size: 0.78rem;
+  color: var(--gk-muted);
+  margin: 0.4rem 0 0.75rem;
+  line-height: 1.5;
+}
+
+.ev-calib__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 0.6rem;
+}
+
+.ev-calib__card {
+  border: 1px solid var(--gk-card-border);
+  border-radius: 8px;
+  padding: 0.65rem 0.75rem;
+  background: var(--gk-card-bg);
+}
+
+.ev-calib__card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 0.8rem;
+  font-weight: 600;
+  margin-bottom: 0.35rem;
+}
+
+.ev-calib__status {
+  font-size: 0.68rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.ev-calib__power {
+  font-size: 0.74rem;
+  color: var(--gk-fg);
+  line-height: 1.4;
+}
+
+.ev-calib__power small { color: var(--gk-muted); }
 
 /* ── Dimension Cards ── */
 

@@ -15,6 +15,7 @@ interface MCQQuestion {
   dimension: string;
   question: string;
   options: MCQOption[];
+  correct_option?: string; // TESTING AID — only present when fetched with ?reveal=true
 }
 
 interface MCQResult {
@@ -97,6 +98,7 @@ export default function ChallengePanel({topicId, topicTitle, onUnderstandingChan
   const [questions, setQuestions] = useState<MCQQuestion[]>([]);
   const [currentIdx, setCurrentIdx] = useState(0);
   const [selectedOption, setSelectedOption] = useState<string | null>(null);
+  const [showHint, setShowHint] = useState(false); // TESTING AID — reveals MCQ answer
   const [mcqResult, setMcqResult] = useState<MCQResult | null>(null);
   const [mcqScores, setMcqScores] = useState<Record<string, DimensionScore>>({});
   const [mcqTotal, setMcqTotal] = useState({correct: 0, total: 0});
@@ -144,7 +146,9 @@ export default function ChallengePanel({topicId, topicTitle, onUnderstandingChan
         if (!genRes.ok) throw new Error(await genRes.text());
       }
 
-      const res = await fetch(`/api/challenge/${topicId}/mcq/questions`);
+      // TESTING AID: ?reveal=true returns correct_option so the dev hint can
+      // show the answer. Drop the query param to disable.
+      const res = await fetch(`/api/challenge/${topicId}/mcq/questions?reveal=true`);
       if (!res.ok) throw new Error(await res.text());
       const data = await res.json();
       if (!data.questions?.length) throw new Error('No questions generated');
@@ -357,6 +361,9 @@ export default function ChallengePanel({topicId, topicTitle, onUnderstandingChan
             } else if (opt.id === selectedOption) {
               optClass += ' gk-challenge__mcq-opt--selected';
             }
+            // TESTING AID: highlight the correct answer while still answering.
+            const isHinted = showHint && mcqState === 'answering' && opt.id === q.correct_option;
+            if (isHinted) optClass += ' gk-challenge__mcq-opt--correct';
             return (
               <button
                 key={opt.id}
@@ -367,10 +374,25 @@ export default function ChallengePanel({topicId, topicTitle, onUnderstandingChan
               >
                 <span className="gk-challenge__mcq-opt-id">{opt.id.toUpperCase()}</span>
                 <span className="gk-challenge__mcq-opt-text">{opt.text}</span>
+                {isHinted && <span className="gk-challenge__mcq-hint-badge">✓ answer</span>}
               </button>
             );
           })}
         </div>
+
+        {/* TESTING AID — answer hint toggle (remove this block + showHint state to disable) */}
+        {mcqState === 'answering' && q.correct_option && (
+          <button
+            type="button"
+            className="gk-challenge__hint-toggle"
+            onClick={() => setShowHint(h => !h)}
+            title="Dev aid: reveal the correct answer to move through assessments"
+          >
+            {showHint
+              ? `Hint: answer is ${q.correct_option.toUpperCase()} (hide)`
+              : '💡 Show answer hint (dev)'}
+          </button>
+        )}
 
         {/* Feedback */}
         {mcqState === 'feedback' && mcqResult && (

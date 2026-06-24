@@ -58,7 +58,7 @@ class TopicRow:
     updated_at: datetime
 
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 SCHEMA_SQL = f"""
 -- Gurukul schema v{SCHEMA_VERSION}
@@ -234,6 +234,21 @@ CREATE TABLE IF NOT EXISTS {SCHEMA}.paper_scaffolds (
     scaffold        JSONB NOT NULL,
     refinement_log  JSONB DEFAULT '[]'::jsonb,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- ── Judge calibration (ablation self-test results) ───────────────────
+-- For each judge-scored dimension, records whether the judge can actually
+-- discriminate quality: we degrade good content and check the score drops.
+-- discriminative_power = avg score drop (0-100) when that dimension is ablated.
+-- A dimension is 'calibrated' only if the drop exceeds the threshold; the
+-- feedback loop refuses to save learnings for uncalibrated dimensions.
+CREATE TABLE IF NOT EXISTS {SCHEMA}.judge_calibration (
+    dimension            TEXT PRIMARY KEY,
+    discriminative_power REAL NOT NULL DEFAULT 0,
+    calibrated           BOOLEAN NOT NULL DEFAULT FALSE,
+    sample_size          INTEGER NOT NULL DEFAULT 0,
+    detail               JSONB NOT NULL DEFAULT '{{}}'::jsonb,
+    updated_at           TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 -- ── Indexes ─────────────────────────────────────────────────────────
@@ -998,6 +1013,53 @@ class GurukuDB:
             )
             rows = await cur.fetchall()
             return [dict(r) for r in rows]
+
+    # ── Judge calibration ─────────────────────────────────────────────
+
+    async def save_calibration(
+        self,
+        dimension: str,
+        discriminative_power: float,
+        calibrated: bool,
+        sample_size: int,
+        detail: dict | None = None,
+    ) -> None:
+        """Upsert the ablation calibration result for one judge dimension."""
+        pool = await self._pool()
+        async with pool.connection() as conn:
+            await conn.execute(
+                f"""INSERT INTO {SCHEMA}.judge_calibration
+                    (dimension, discriminative_power, calibrated, sample_size, detail, updated_at)
+                    VALUES (%s, %s, %s, %s, %s, NOW())
+                    ON CONFLICT (dimension) DO UPDATE SET
+                        discriminative_power = EXCLUDED.discriminative_power,
+                        calibrated = EXCLUDED.calibrated,
+                        sample_size = EXCLUDED.sample_size,
+                        detail = EXCLUDED.detail,
+                        updated_at = NOW()""",
+                (dimension, discriminative_power, calibrated, sample_size,
+                 json.dumps(detail or {})),
+            )
+            await conn.commit()
+
+    async def get_calibration(self) -> dict[str, dict]:
+        """Return {dimension: {discriminative_power, calibrated, sample_size, detail, updated_at}}."""
+        pool = await self._pool()
+        async with pool.connection() as conn:
+            conn.row_factory = dict_row
+            cur = await conn.execute(
+                f"""SELECT dimension, discriminative_power, calibrated,
+                           sample_size, detail, updated_at
+                    FROM {SCHEMA}.judge_calibration""",
+            )
+            rows = await cur.fetchall()
+            out = {}
+            for r in rows:
+                d = dict(r)
+                if d.get("updated_at"):
+                    d["updated_at"] = d["updated_at"].isoformat()
+                out[d["dimension"]] = d
+            return out
 
     # ── MCQ ──────────────────────────────────────────────────────────
 

@@ -19,7 +19,7 @@ from typing import AsyncGenerator
 from uuid import uuid4
 
 import mlflow
-from agents import Agent, Runner, function_tool, set_default_openai_api, set_default_openai_client
+from agents import Agent, ModelSettings, Runner, function_tool, set_default_openai_api, set_default_openai_client
 from databricks_openai import AsyncDatabricksOpenAI
 from mlflow.genai.agent_server import invoke, stream
 from mlflow.types.responses import (
@@ -38,6 +38,11 @@ from agent_server.prompts import (
     SCHEMA_HINT_TOPIC,
     STUDENT_SYSTEM,
     TEACHER_SYSTEM,
+)
+from agent_server.schemas import (
+    DECOMPOSE_SCHEMA,
+    TOPIC_CONTENT_SCHEMA,
+    response_format,
 )
 from agent_server.sse import broadcast
 from agent_server.utils import extract_json, get_session_id, process_agent_stream_events
@@ -153,6 +158,9 @@ async def do_decompose(seed: str, parent_id: str | None = None) -> str:
         name="Teacher",
         instructions=TEACHER_SYSTEM,
         model=TEACHER_MODEL,
+        model_settings=ModelSettings(extra_body={
+            "response_format": response_format("knowledge_graph", DECOMPOSE_SCHEMA),
+        }),
     )
 
     t0 = time.monotonic()
@@ -408,10 +416,21 @@ async def do_generate_topic_content(topic_id: str, quality_hint: str | None = No
     user_parts.append(SCHEMA_HINT_TOPIC)
     user_parts.append("\nReturn strict JSON only.")
 
+    # Constrain output to the strict schema for normal chapters. Comparison
+    # chapters use dynamic model-name keys (model_comparison.cells), which a
+    # strict schema can't express, so those stay on the free-text path.
+    if topic["is_comparison"]:
+        student_settings = ModelSettings()
+    else:
+        student_settings = ModelSettings(extra_body={
+            "response_format": response_format("topic_content", TOPIC_CONTENT_SCHEMA),
+        })
+
     student = Agent(
         name="Student",
         instructions=STUDENT_SYSTEM,
         model=STUDENT_MODEL,
+        model_settings=student_settings,
     )
 
     try:
@@ -453,6 +472,10 @@ async def do_generate_topic_content(topic_id: str, quality_hint: str | None = No
                     name="Deepener",
                     instructions=DEEPEN_SYSTEM,
                     model=STUDENT_MODEL,
+                    model_settings=ModelSettings(extra_body={
+                        "response_format": response_format(
+                            "topic_content", TOPIC_CONTENT_SCHEMA),
+                    }),
                 )
                 deepen_prompt = (
                     f'Topic: "{topic["title"]}"\n\n'

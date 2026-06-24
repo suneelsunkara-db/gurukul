@@ -14,10 +14,11 @@ import os
 import time
 from typing import Any
 
-from agents import Agent, Runner
+from agents import Agent, ModelSettings, Runner
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+import agent_server.schemas as _schemas
 from agent_server.db import GurukuDB
 from agent_server.guardrails import (
     sanitize_payload,
@@ -239,6 +240,9 @@ async def generate_mcq(topic_id: str):
         name="MCQ-Generator",
         instructions=MCQ_GENERATION_SYSTEM,
         model=MCQ_MODEL,
+        model_settings=ModelSettings(extra_body={
+            "response_format": _schemas.response_format("mcq_questions", _schemas.MCQ_SCHEMA),
+        }),
     )
 
     t0 = time.monotonic()
@@ -277,8 +281,14 @@ async def generate_mcq(topic_id: str):
 
 
 @router.get("/challenge/{topic_id}/mcq/questions")
-async def get_mcq_questions(topic_id: str):
-    """Get existing MCQ questions for a topic."""
+async def get_mcq_questions(topic_id: str, reveal: bool = False):
+    """Get existing MCQ questions for a topic.
+
+    By default the correct answer is stripped. Pass ``?reveal=true`` to also
+    return ``correct_option`` per question — a TESTING AID for moving through
+    assessments to reach the Research flow. (Safe to remove later: delete the
+    ``reveal`` param and the ``correct_option`` block below.)
+    """
     questions = await db.get_mcq_questions(topic_id)
     if not questions:
         return {"questions": [], "count": 0}
@@ -292,13 +302,17 @@ async def get_mcq_questions(topic_id: str):
             {"id": o["id"], "text": o["text"]}
             for o in opts
         ]
-        safe_questions.append({
+        item = {
             "id": q["id"],
             "sub_concept": q["sub_concept"],
             "dimension": q["dimension"],
             "question": q["question"],
             "options": safe_opts,
-        })
+        }
+        if reveal:  # TESTING AID — reveals the answer; remove when no longer needed
+            correct = next((o["id"] for o in opts if o.get("is_correct")), None)
+            item["correct_option"] = correct
+        safe_questions.append(item)
 
     return {"questions": safe_questions, "count": len(safe_questions)}
 
@@ -1056,27 +1070,78 @@ def _score_epistemic(payload: dict) -> tuple[float, list[str]]:
     return score, suggestions
 
 
-async def _score_llm_judge(title: str, payload: dict) -> dict[str, tuple[float, list[str]]]:
-    """Run LLM judge and return individual sub-dimension scores.
+JUDGE_DIMS = ("factual_accuracy", "comprehensiveness", "depth", "research_readiness")
+JUDGE_SAMPLES = int(os.environ.get("JUDGE_SAMPLES", "3"))
 
-    Returns a dict mapping each sub-dimension key to (score_0_to_1, suggestions).
-    Keys: factual_accuracy, comprehensiveness, depth, research_readiness.
+# Strict structured-output schema for the judge. Databricks Foundation Model
+# APIs enforce this during decoding (Claude supports json_schema), so every
+# response is valid, complete JSON with all keys present and correctly typed —
+# eliminating omitted dimensions, non-numeric scores, prose-wrapping, and
+# mid-JSON truncation at the source rather than repairing them after the fact.
+def _dim_schema(extra_key: str | None) -> dict:
+    props = {"score": _schemas.INT, "reasoning": _schemas.STR}
+    if extra_key:
+        props[extra_key] = _schemas.arr(_schemas.STR)
+    return _schemas.obj(props)
+
+
+JUDGE_RESPONSE_FORMAT = _schemas.response_format(
+    "content_quality_evaluation",
+    _schemas.obj({
+        "factual_accuracy": _dim_schema("issues"),
+        "comprehensiveness": _dim_schema("gaps"),
+        "depth": _dim_schema(None),
+        "research_readiness": _dim_schema("missing_for_research"),
+    }),
+)
+
+
+async def _judge_once(client, model, messages) -> dict | None:
+    """Run one judge sample with strict structured outputs.
+
+    Returns the parsed JSON dict, or None ONLY on a genuine infra failure
+    (network/endpoint error). Because decoding is schema-constrained, a
+    successful call always yields valid, complete JSON.
     """
+    import asyncio as _aio
+    for attempt in range(2):
+        try:
+            resp = await client.chat.completions.create(
+                model=model,
+                messages=messages,
+                max_tokens=2000,
+                response_format=JUDGE_RESPONSE_FORMAT,
+            )
+            raw = (resp.choices[0].message.content or "").strip()
+            if raw:
+                return json.loads(raw)
+            logger.warning("Judge returned empty content (finish=%s)",
+                           resp.choices[0].finish_reason if resp.choices else "?")
+        except Exception as e:
+            logger.warning("Judge sample failed: %s", e)
+        if attempt < 1:
+            await _aio.sleep(1.5 * (attempt + 1))
+    return None
+
+
+async def _score_llm_judge(title: str, payload: dict) -> dict[str, tuple[float | None, list[str]]]:
+    """Run the LLM judge with self-consistency (median of N samples).
+
+    Returns {dim_key: (score_0_to_1 | None, suggestions)}. Score is None when
+    the judge could not produce a usable result — callers must treat None as
+    "unscored", never as a real low score. Self-consistency reduces variance;
+    a failed sample contributes nothing rather than a fabricated fallback.
+    """
+    import asyncio as _aio
+    import statistics
     from databricks_openai import AsyncDatabricksOpenAI
     from agent_server.prompts import JUDGE_SYSTEM
-
-    fallback: dict[str, tuple[float, list[str]]] = {
-        "factual_accuracy": (0.65, []),
-        "comprehensiveness": (0.65, []),
-        "depth": (0.65, []),
-        "research_readiness": (0.65, []),
-    }
 
     client = AsyncDatabricksOpenAI()
 
     trimmed = {
         "summary": (payload.get("summary") or "")[:500],
-        "key_aspects": payload.get("key_aspects", [])[:3],
+        "key_aspects": payload.get("key_aspects", [])[:4],
         "open_problems": payload.get("open_problems", [])[:3],
         "takeaway": (payload.get("takeaway") or "")[:300],
         "references": [
@@ -1084,68 +1149,56 @@ async def _score_llm_judge(title: str, payload: dict) -> dict[str, tuple[float, 
             for r in payload.get("references", [])[:5]
         ],
     }
-    content_text = json.dumps(trimmed, indent=2)[:4000]
+    content_text = json.dumps(trimmed, indent=2)[:5000]
+    model = os.environ.get("TEACHER_MODEL", "databricks-claude-sonnet-4-6")
+    user_msg = (
+        f"Topic: {title}\n\nContent:\n{content_text}\n\n"
+        "Respond with a JSON object only. No markdown fences, no explanation."
+    )
+    messages = [
+        {"role": "system", "content": JUDGE_SYSTEM},
+        {"role": "user", "content": user_msg},
+    ]
 
-    try:
-        import asyncio as _aio
-        model = os.environ.get("TEACHER_MODEL", "databricks-claude-sonnet-4-6")
-        user_msg = (
-            f"Topic: {title}\n\nContent:\n{content_text}\n\n"
-            "Respond with a JSON object only. No markdown fences, no explanation."
-        )
-        messages = [
-            {"role": "system", "content": JUDGE_SYSTEM},
-            {"role": "user", "content": user_msg},
-        ]
+    samples = await _aio.gather(*[
+        _judge_once(client, model, messages) for _ in range(JUDGE_SAMPLES)
+    ])
+    valid = [s for s in samples if isinstance(s, dict)]
 
-        raw = ""
-        for attempt in range(3):
-            try:
-                resp = await client.chat.completions.create(
-                    model=model,
-                    messages=messages,
-                    max_tokens=1500,
-                )
-                raw = (resp.choices[0].message.content or "").strip()
-                if raw:
-                    break
-                logger.warning("LLM judge empty on attempt %d for '%s' (finish=%s)",
-                              attempt + 1, title,
-                              resp.choices[0].finish_reason if resp.choices else "?")
-            except Exception as retry_err:
-                logger.warning("LLM judge attempt %d failed for '%s': %s",
-                              attempt + 1, title, retry_err)
-            if attempt < 2:
-                await _aio.sleep(2 * (attempt + 1))
+    if not valid:
+        logger.warning("LLM judge: all %d samples failed for '%s'", JUDGE_SAMPLES, title)
+        return {k: (None, ["LLM judge unavailable (all samples failed)"]) for k in JUDGE_DIMS}
 
-        if not raw:
-            return {k: (v[0], ["LLM judge returned empty after 3 attempts"]) for k, v in fallback.items()}
+    out: dict[str, tuple[float | None, list[str]]] = {}
+    for dim_key in JUDGE_DIMS:
+        raw_scores: list[float] = []
+        best_sug: list[str] = []
+        lowest = 101
+        for s in valid:
+            dd = s.get(dim_key, {})
+            sc = dd.get("score")
+            if isinstance(sc, (int, float)):
+                raw_scores.append(float(sc))
+                # Keep suggestions from the harshest sample (most informative).
+                if sc < lowest:
+                    lowest = sc
+                    sug: list[str] = []
+                    reasoning = dd.get("reasoning", "")
+                    if reasoning and sc < 80:
+                        sug.append(reasoning)
+                    for issue in dd.get("issues", [])[:2]:
+                        sug.append(f"Issue: {issue}")
+                    for gap in dd.get("gaps", [])[:2]:
+                        sug.append(f"Gap: {gap}")
+                    for need in dd.get("missing_for_research", [])[:2]:
+                        sug.append(f"For research: {need}")
+                    best_sug = sug[:3]
+        if raw_scores:
+            out[dim_key] = (statistics.median(raw_scores) / 100.0, best_sug)
+        else:
+            out[dim_key] = (None, ["LLM judge did not score this dimension"])
 
-        if raw.startswith("```"):
-            raw = raw.split("\n", 1)[1].rsplit("```", 1)[0].strip()
-        result = json.loads(raw)
-
-        out: dict[str, tuple[float, list[str]]] = {}
-        for dim_key in ("factual_accuracy", "comprehensiveness", "depth", "research_readiness"):
-            dim_data = result.get(dim_key, {})
-            score = dim_data.get("score", 70) / 100.0
-            sug: list[str] = []
-            reasoning = dim_data.get("reasoning", "")
-            if reasoning and dim_data.get("score", 100) < 80:
-                sug.append(reasoning)
-            for issue in dim_data.get("issues", [])[:2]:
-                sug.append(f"Issue: {issue}")
-            for gap in dim_data.get("gaps", [])[:2]:
-                sug.append(f"Gap: {gap}")
-            for need in dim_data.get("missing_for_research", [])[:2]:
-                sug.append(f"For research: {need}")
-            out[dim_key] = (score, sug[:3])
-
-        return out
-
-    except Exception as e:
-        logger.warning("LLM judge failed for '%s': %s", title, e)
-        return {k: (v[0], [f"LLM evaluation unavailable: {e}"]) for k, v in fallback.items()}
+    return out
 
 
 ALL_DIM_KEYS = list(QUALITY_DIMENSIONS.keys())
@@ -1181,10 +1234,245 @@ async def _score_all_dimensions(title: str, payload: dict) -> dict[str, tuple[fl
     return scores
 
 
-def _compute_overall(scores: dict[str, tuple[float, list[str]]]) -> int:
-    """Weighted overall score from all 8 dimensions."""
-    total = sum(scores.get(k, (0.65, []))[0] * w for k, w in DIM_WEIGHTS.items())
-    return round(total * 100)
+def _compute_overall(scores: dict[str, tuple[float | None, list[str]]]) -> int:
+    """Weighted overall score over the dimensions that were actually scored.
+
+    Unscored dimensions (None — e.g. the judge failed) are excluded and the
+    remaining weights are renormalized, so a failed judge call neither inflates
+    nor deflates the overall with fabricated data.
+    """
+    present = {
+        k: scores.get(k, (None, []))[0]
+        for k in DIM_WEIGHTS
+        if scores.get(k, (None, []))[0] is not None
+    }
+    if not present:
+        return 0
+    total_weight = sum(DIM_WEIGHTS[k] for k in present)
+    weighted = sum(present[k] * DIM_WEIGHTS[k] for k in present)
+    return round(weighted / total_weight * 100)
+
+
+# Maps any incoming dimension label/key (from the UI or improvement plan) to a
+# canonical dimension key. Used so the feedback loop tracks the RIGHT dimension.
+DIM_LABEL_MAP = {
+    "grounding": "grounding",
+    "epistemic markers": "epistemic", "epistemic": "epistemic",
+    "reference integrity": "references", "references": "references",
+    "content structure": "structure", "structure": "structure",
+    "technical depth": "depth", "depth": "depth",
+    "factual accuracy": "factual_accuracy", "factual_accuracy": "factual_accuracy",
+    "comprehensiveness": "comprehensiveness",
+    "research readiness": "research_readiness", "research_readiness": "research_readiness",
+    "research quality": "depth",
+}
+
+# Dimensions scored by the LLM judge (subject to calibration gating).
+JUDGE_DIM_KEYS = ("factual_accuracy", "comprehensiveness", "depth", "research_readiness")
+
+
+def _normalize_dim_key(dimension: str) -> str:
+    """Normalize a dimension label/key to its canonical key."""
+    key = (dimension or "").lower().strip()
+    return DIM_LABEL_MAP.get(key, key.replace(" ", "_"))
+
+
+async def _score_topic_full(title: str, payload: dict) -> dict:
+    """Score one topic across all 8 dimensions using the SAME scorer as the
+    dashboard (heuristics + LLM judge). Returns {overall, <dim>: 0-100|None}.
+
+    This is what before/after measurement must use — never a heuristic-only
+    proxy — so deltas reflect the dimension actually being improved.
+    """
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except Exception:
+            return {"overall": 0, **{dk: None for dk in ALL_DIM_KEYS}}
+
+    scores = await _score_all_dimensions(title, payload)
+    out: dict = {"overall": _compute_overall(scores)}
+    for dk in ALL_DIM_KEYS:
+        v = scores.get(dk, (None, []))[0]
+        out[dk] = round(v * 100) if v is not None else None
+    return out
+
+
+async def _latest_per_topic_scores() -> dict[str, dict]:
+    """Return {topic_id: {overall, dimensions}} from the most recent eval run.
+
+    This is the authoritative per-topic signal (real LLM-judge scores), reused
+    for weak-topic selection and 'before' snapshots without re-running the judge.
+    """
+    history = await db.get_eval_history(limit=1, include_per_topic=True)
+    if not history:
+        return {}
+    out: dict[str, dict] = {}
+    for tp in history[0].get("per_topic", []):
+        out[tp["topic_id"]] = {
+            "overall": tp.get("overall", 0),
+            "dimensions": tp.get("dimensions", {}),
+        }
+    return out
+
+
+# ── Judge calibration via ablation self-test ─────────────────────────
+# We degrade good content along a specific dimension and verify the judge's
+# score for that dimension drops. If it doesn't, the judge is blind to that
+# dimension and its scores are not a trustworthy signal — so we refuse to let
+# that dimension drive the feedback loop. This validates the judge WITHOUT
+# human labels by testing discriminative power.
+
+CALIBRATION_THRESHOLD = 15.0  # min avg score-drop (0-100) to trust a dimension
+
+
+def _first_sentence(text: str) -> str:
+    """Return just the first sentence — strips explanatory depth."""
+    import re
+    parts = re.split(r"(?<=[.!?])\s+", (text or "").strip(), maxsplit=1)
+    return parts[0] if parts else (text or "")
+
+
+def _ablate_payload(payload: dict, dim_key: str) -> dict:
+    """Return a deep-ish copy of payload deliberately degraded for `dim_key`.
+
+    Each ablation removes exactly the signal that dimension is supposed to
+    measure, so a working judge should score the ablated version much lower.
+    """
+    import copy
+    p = copy.deepcopy(payload)
+    aspects = p.get("key_aspects", []) or []
+
+    if dim_key == "depth":
+        # Strip mechanism/math/trade-offs — keep only a one-line description.
+        for a in aspects:
+            if isinstance(a, dict):
+                a["body"] = _first_sentence(a.get("body", ""))
+        p["gists"] = []
+    elif dim_key == "comprehensiveness":
+        # Cover only the single core aspect; drop breadth.
+        p["key_aspects"] = aspects[:1]
+        p["open_problems"] = []
+    elif dim_key == "research_readiness":
+        # Remove the things that enable related-works / gap identification.
+        p["open_problems"] = []
+        p["references"] = []
+        p["connections"] = []
+    elif dim_key == "factual_accuracy":
+        # Inject a blatantly fabricated claim a working judge should catch.
+        bogus = (" This approach achieves exactly 100% accuracy on every "
+                 "benchmark and uses precisely 999 trillion parameters, as "
+                 "proven by Smith et al. (1850).")
+        p["summary"] = (p.get("summary") or "") + bogus
+        if aspects and isinstance(aspects[0], dict):
+            aspects[0]["body"] = (aspects[0].get("body", "") + bogus)
+
+    return p
+
+
+async def run_calibration(sample_size: int = 3) -> dict:
+    """Run the ablation self-test across a sample of topics and persist results."""
+    import asyncio as _aio
+
+    topics = await db.get_all_topics()
+    done = [t for t in topics if t["status"] == "done" and t.get("payload")]
+    if not done:
+        return {"error": "No completed topics to calibrate against"}
+
+    # Prefer the highest-scoring topics as the 'good' baseline if we know them.
+    latest = await _latest_per_topic_scores()
+    done.sort(key=lambda t: latest.get(t["id"], {}).get("overall", 0), reverse=True)
+    sample = done[:sample_size]
+
+    broadcast("thought", {
+        "step": "calibration_start",
+        "message": f"Running judge ablation self-test on {len(sample)} topic(s)...",
+    })
+
+    drops: dict[str, list[float]] = {dk: [] for dk in JUDGE_DIM_KEYS}
+    detail: dict[str, list[dict]] = {dk: [] for dk in JUDGE_DIM_KEYS}
+
+    for t in sample:
+        payload = t["payload"]
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except Exception:
+                continue
+        title = t["title"]
+
+        base = await _score_llm_judge(title, payload)
+
+        async def _ablate_and_score(dk: str):
+            ablated = _ablate_payload(payload, dk)
+            return dk, await _score_llm_judge(title, ablated)
+
+        results = await _aio.gather(*[_ablate_and_score(dk) for dk in JUDGE_DIM_KEYS])
+
+        for dk, abl in results:
+            base_v = base.get(dk, (None, []))[0]
+            abl_v = abl.get(dk, (None, []))[0]
+            if base_v is not None and abl_v is not None:
+                drop = (base_v - abl_v) * 100
+                drops[dk].append(drop)
+                detail[dk].append({
+                    "topic": title[:40],
+                    "base": round(base_v * 100),
+                    "ablated": round(abl_v * 100),
+                    "drop": round(drop, 1),
+                })
+
+    out = {}
+    for dk in JUDGE_DIM_KEYS:
+        ds = drops[dk]
+        power = sum(ds) / len(ds) if ds else 0.0
+        calibrated = power >= CALIBRATION_THRESHOLD
+        await db.save_calibration(
+            dimension=dk,
+            discriminative_power=round(power, 1),
+            calibrated=calibrated,
+            sample_size=len(ds),
+            detail={"samples": detail[dk], "threshold": CALIBRATION_THRESHOLD},
+        )
+        out[dk] = {
+            "label": QUALITY_DIMENSIONS[dk]["label"],
+            "discriminative_power": round(power, 1),
+            "calibrated": calibrated,
+            "sample_size": len(ds),
+        }
+
+    broadcast("thought", {
+        "step": "calibration_done",
+        "message": "Judge calibration complete.",
+    })
+
+    return {"dimensions": out, "threshold": CALIBRATION_THRESHOLD, "sample_size": len(sample)}
+
+
+@router.post("/eval/calibrate")
+async def calibrate_judge(body: dict | None = None):
+    """Run the ablation self-test to validate the judge's discriminative power."""
+    sample_size = int((body or {}).get("sample_size", 3))
+    return await run_calibration(sample_size=max(1, min(sample_size, 10)))
+
+
+@router.get("/eval/calibration")
+async def get_judge_calibration():
+    """Return the latest calibration status per judge dimension."""
+    cal = await db.get_calibration()
+    return {
+        "calibration": {
+            dk: {
+                "label": QUALITY_DIMENSIONS[dk]["label"],
+                "discriminative_power": cal.get(dk, {}).get("discriminative_power", 0),
+                "calibrated": cal.get(dk, {}).get("calibrated", False),
+                "sample_size": cal.get(dk, {}).get("sample_size", 0),
+                "updated_at": cal.get(dk, {}).get("updated_at"),
+            }
+            for dk in JUDGE_DIM_KEYS
+        },
+        "threshold": CALIBRATION_THRESHOLD,
+    }
 
 
 @router.get("/quality/{topic_id}")
@@ -1286,16 +1574,20 @@ async def get_quality_overview():
         for _, (_, sug) in scores.items():
             all_sug.extend(sug)
 
+        def _dim_pct(dk: str):
+            v = scores.get(dk, (None, []))[0]
+            return round(v * 100) if v is not None else None
+
         return {
             "topic_id": t["id"],
             "title": t["title"],
             "category": t["category"],
             "overall": overall,
             "verdict": verdict,
-            "dimensions": {dk: round(scores.get(dk, (0.65, []))[0] * 100) for dk in ALL_DIM_KEYS},
+            "dimensions": {dk: _dim_pct(dk) for dk in ALL_DIM_KEYS},
             "suggestion_count": len(all_sug),
             "top_suggestion": all_sug[0] if all_sug else None,
-            "_raw_scores": {dk: scores.get(dk, (0.65, []))[0] for dk in ALL_DIM_KEYS},
+            "_raw_scores": {dk: scores.get(dk, (None, []))[0] for dk in ALL_DIM_KEYS},
         }
 
     sem = _asyncio.Semaphore(4)
@@ -1312,7 +1604,9 @@ async def get_quality_overview():
         results.append(r)
         raw = r.pop("_raw_scores")
         for dk in ALL_DIM_KEYS:
-            dim_totals[dk].append(raw.get(dk, 0.65))
+            val = raw.get(dk)
+            if val is not None:
+                dim_totals[dk].append(val)
 
     n = len(results)
     aggregate = {
@@ -1614,6 +1908,12 @@ def _generate_insights(aggregate: dict, suggestions: list, improvements: dict | 
     return insights
 
 
+def _dim_score(t: dict, dk: str) -> float | None:
+    """Per-topic dimension score, or None if missing/unscored (judge failure)."""
+    v = t.get("dimensions", {}).get(dk)
+    return v if isinstance(v, (int, float)) else None
+
+
 def _generate_improvement_plan(
     aggregate: dict,
     suggestions: list,
@@ -1636,11 +1936,13 @@ def _generate_improvement_plan(
 
         label = QUALITY_DIMENSIONS.get(dk, {}).get("label", dk)
 
+        # None dimension values mean "unscored" (e.g. judge rate-limited) — they
+        # are not weak, so they must be excluded from threshold comparisons.
         weak_topics = [
             t for t in per_topic
-            if t.get("dimensions", {}).get(dk, 100) < 70
+            if (_dim_score(t, dk) is not None and _dim_score(t, dk) < 70)
         ]
-        weak_topics.sort(key=lambda t: t["dimensions"].get(dk, 100))
+        weak_topics.sort(key=lambda t: _dim_score(t, dk) if _dim_score(t, dk) is not None else 100)
 
         if mean >= 85:
             actions = [{
@@ -1695,7 +1997,7 @@ def _generate_improvement_plan(
 
         if weak_topics:
             item["weak_topics"] = [
-                {"id": t["topic_id"], "title": t["title"], "score": t["dimensions"].get(dk, 0)}
+                {"id": t["topic_id"], "title": t["title"], "score": _dim_score(t, dk) or 0}
                 for t in weak_topics[:6]
             ]
 
@@ -1704,7 +2006,8 @@ def _generate_improvement_plan(
     weak_count = aggregate.get("weak", 0)
     if weak_count > 0:
         weak_overall = [
-            t for t in per_topic if t.get("overall", 100) < 60
+            t for t in per_topic
+            if isinstance(t.get("overall"), (int, float)) and t["overall"] < 60
         ]
         plan.append({
             "priority": len(plan) + 1,
@@ -2057,65 +2360,45 @@ async def apply_eval_action(body: dict):
         if not eval_run_id:
             raise HTTPException(400, "Could not create eval run")
 
+    # Canonical dimension key drives selection, delta tracking, and learning.
+    dk = _normalize_dim_key(dimension)
+
+    # Latest eval run holds the authoritative per-topic LLM-judge scores.
+    latest = await _latest_per_topic_scores()
+
     if not topic_ids:
-        all_topics = await db.get_all_topics()
-        done_topics = [t for t in all_topics if t["status"] == "done" and t.get("payload")]
-
         if action_type == "regenerate_weak":
-            for t in done_topics:
-                scores = _score_topic(t["payload"])
-                if scores["overall"] < 70:
-                    topic_ids.append(t["id"])
+            topic_ids = [tid for tid, s in latest.items() if s["overall"] < 70]
         elif action_type == "regenerate":
-            dim_key = dimension.lower().replace(" ", "_").replace("epistemic_markers", "epistemic")
-            dim_map = {
-                "grounding": "grounding", "epistemic markers": "epistemic",
-                "epistemic": "epistemic", "reference integrity": "references",
-                "references": "references", "content structure": "structure",
-                "structure": "structure",
-                "technical depth": "depth", "depth": "depth",
-                "factual accuracy": "factual_accuracy", "factual_accuracy": "factual_accuracy",
-                "comprehensiveness": "comprehensiveness",
-                "research readiness": "research_readiness", "research_readiness": "research_readiness",
-                "research quality": "depth",
-            }
-            dk = dim_map.get(dim_key, dim_key)
+            # Find topics weak in the TARGETED dimension using real scores.
+            def _weak(threshold: int) -> list[str]:
+                picks = []
+                for tid, s in latest.items():
+                    v = s["dimensions"].get(dk)
+                    if isinstance(v, (int, float)) and v < threshold:
+                        picks.append((tid, v))
+                picks.sort(key=lambda x: x[1])
+                return [tid for tid, _ in picks]
 
-            if dk == "llm_judge":
-                run_data = await db.get_eval_history(limit=1, include_per_topic=True)
-                if run_data:
-                    per_topic = run_data[0].get("per_topic", [])
-                    for tp in per_topic:
-                        score = tp.get("dimensions", {}).get("llm_judge", 100)
-                        if score < 70:
-                            topic_ids.append(tp["topic_id"])
-                    if not topic_ids:
-                        for tp in per_topic:
-                            score = tp.get("dimensions", {}).get("llm_judge", 100)
-                            if score < 85:
-                                topic_ids.append(tp["topic_id"])
-            else:
-                for t in done_topics:
-                    scores = _score_topic(t["payload"])
-                    if scores.get(dk, 100) < 70:
-                        topic_ids.append(t["id"])
-                if not topic_ids:
-                    for t in done_topics:
-                        scores = _score_topic(t["payload"])
-                        if scores.get(dk, 100) < 85:
-                            topic_ids.append(t["id"])
+            topic_ids = _weak(70) or _weak(85)
 
     if not topic_ids:
         return {"ok": False, "message": "No topics need improvement for this dimension"}
 
+    # 'Before' snapshot: prefer the real scores from the latest eval run (what
+    # the user saw); fall back to full scoring if a topic wasn't in that run.
     before_scores = {}
     for tid in topic_ids:
         t = await db.get_topic(tid)
-        if t and t.get("payload"):
+        title = t["title"] if t else tid
+        if tid in latest:
             before_scores[tid] = {
-                "title": t["title"],
-                **_score_topic(t["payload"]),
+                "title": title,
+                "overall": latest[tid]["overall"],
+                **{k: latest[tid]["dimensions"].get(k) for k in ALL_DIM_KEYS},
             }
+        elif t and t.get("payload"):
+            before_scores[tid] = {"title": title, **(await _score_topic_full(title, t["payload"]))}
 
     action_id = await db.create_eval_action(
         eval_run_id=eval_run_id,
@@ -2230,29 +2513,33 @@ async def apply_eval_action(body: dict):
 
             await asyncio.gather(*[_gen_one(tid) for tid in topic_ids])
 
+            # 'After' is measured with the SAME full scorer (heuristics + judge).
             after_scores = {}
             for tid in topic_ids:
                 t = await db.get_topic(tid)
                 if t and t.get("payload"):
                     after_scores[tid] = {
                         "title": t["title"],
-                        **_score_topic(t["payload"]),
+                        **(await _score_topic_full(t["title"], t["payload"])),
                     }
+
+            # Delta over ALL dimensions. None when either side is unscored.
+            def _d(a, b):
+                return (a - b) if isinstance(a, (int, float)) and isinstance(b, (int, float)) else None
 
             delta = {}
             for tid in topic_ids:
                 b = before_scores.get(tid, {})
                 a = after_scores.get(tid, {})
-                delta[tid] = {
+                row = {
                     "title": a.get("title", b.get("title", "")),
-                    "overall": a.get("overall", 0) - b.get("overall", 0),
-                    "grounding": a.get("grounding", 0) - b.get("grounding", 0),
-                    "epistemic": a.get("epistemic", 0) - b.get("epistemic", 0),
-                    "references": a.get("references", 0) - b.get("references", 0),
-                    "structure": a.get("structure", 0) - b.get("structure", 0),
                     "before": b.get("overall", 0),
                     "after": a.get("overall", 0),
+                    "overall": _d(a.get("overall"), b.get("overall")),
                 }
+                for k in ALL_DIM_KEYS:
+                    row[k] = _d(a.get(k), b.get(k))
+                delta[tid] = row
 
             await db.update_eval_action_status(
                 action_id, "done",
@@ -2260,22 +2547,46 @@ async def apply_eval_action(body: dict):
                 delta=delta,
             )
 
+            # Learning gate: only persist a hint if (1) the judge can actually
+            # discriminate this dimension (calibrated), and (2) the TARGETED
+            # dimension genuinely improved — measured on the real dimension,
+            # not a heuristic proxy.
             if hint:
-                avg_delta = 0
-                dim_key = dimension.lower().replace(" ", "_")
-                for tid_delta in delta.values():
-                    avg_delta += tid_delta.get(dim_key, tid_delta.get("overall", 0))
-                avg_delta = avg_delta / max(1, len(delta))
-                if avg_delta > 0:
-                    await db.save_quality_learning(
-                        dimension=dimension.lower(),
-                        hint=hint,
-                        delta_pct=avg_delta,
-                        source_action_id=action_id,
+                calibration = await db.get_calibration()
+                is_judge_dim = dk in JUDGE_DIM_KEYS
+                calibrated = (not is_judge_dim) or calibration.get(dk, {}).get("calibrated", False)
+
+                dim_deltas = [
+                    row[dk] for row in delta.values()
+                    if isinstance(row.get(dk), (int, float))
+                ]
+                if not calibrated:
+                    logger.warning(
+                        "Skipping learning for '%s': judge not calibrated for this dimension "
+                        "(run the ablation self-test first)", dk,
                     )
+                elif dim_deltas:
+                    avg_delta = sum(dim_deltas) / len(dim_deltas)
+                    if avg_delta > 0:
+                        await db.save_quality_learning(
+                            dimension=dk,
+                            hint=hint,
+                            delta_pct=avg_delta,
+                            source_action_id=action_id,
+                        )
+                        logger.info(
+                            "Saved quality learning for '%s' (avg delta on %s: +%.1f%%)",
+                            dimension, dk, avg_delta,
+                        )
+                    else:
+                        logger.info(
+                            "No learning saved for '%s': %s did not improve (avg delta %.1f%%)",
+                            dimension, dk, avg_delta,
+                        )
+                else:
                     logger.info(
-                        "Saved quality learning for '%s' (avg delta: +%.1f%%)",
-                        dimension, avg_delta,
+                        "No learning saved for '%s': dimension %s was unscored",
+                        dimension, dk,
                     )
 
             broadcast("eval_action", {
@@ -2334,27 +2645,29 @@ async def review_eval_action(action_id: int):
         if t and t.get("payload"):
             current_scores[tid] = {
                 "title": t["title"],
-                **_score_topic(t["payload"]),
+                **(await _score_topic_full(t["title"], t["payload"])),
             }
+
+    def _d(a, b):
+        return (a - b) if isinstance(a, (int, float)) and isinstance(b, (int, float)) else None
 
     delta = {}
     for tid in topic_ids:
         b = before_scores.get(tid, {})
         c = current_scores.get(tid, {})
-        delta[tid] = {
+        row = {
             "title": c.get("title", b.get("title", "")),
             "before": b.get("overall", 0),
             "after": c.get("overall", 0),
-            "overall": c.get("overall", 0) - b.get("overall", 0),
-            "grounding": c.get("grounding", 0) - b.get("grounding", 0),
-            "epistemic": c.get("epistemic", 0) - b.get("epistemic", 0),
-            "references": c.get("references", 0) - b.get("references", 0),
-            "structure": c.get("structure", 0) - b.get("structure", 0),
+            "overall": _d(c.get("overall"), b.get("overall")),
         }
+        for k in ALL_DIM_KEYS:
+            row[k] = _d(c.get(k), b.get(k))
+        delta[tid] = row
 
-    improved = sum(1 for d in delta.values() if d["overall"] > 0)
-    degraded = sum(1 for d in delta.values() if d["overall"] < 0)
-    unchanged = sum(1 for d in delta.values() if d["overall"] == 0)
+    improved = sum(1 for d in delta.values() if (d["overall"] or 0) > 0)
+    degraded = sum(1 for d in delta.values() if (d["overall"] or 0) < 0)
+    unchanged = sum(1 for d in delta.values() if (d["overall"] or 0) == 0)
 
     return {
         "ok": True,
@@ -2612,12 +2925,11 @@ async def generate_research_directions():
             {"role": "user", "content": "\n".join(context_parts)},
         ],
         max_tokens=2000,
+        response_format=_schemas.response_format(
+            "research_directions", _schemas.RESEARCH_DIRECTIONS_SCHEMA),
     )
 
-    raw = resp.choices[0].message.content or ""
-    raw = raw.strip()
-    if raw.startswith("```"):
-        raw = raw.split("\n", 1)[1].rsplit("```", 1)[0]
+    raw = (resp.choices[0].message.content or "").strip()
 
     try:
         result = json.loads(raw)
@@ -2668,13 +2980,11 @@ async def generate_paper_scaffold(body: dict):
             {"role": "user", "content": "\n".join(context_parts)},
         ],
         max_tokens=3000,
-        temperature=0.3,
+        response_format=_schemas.response_format(
+            "paper_scaffold", _schemas.PAPER_SCAFFOLD_SCHEMA),
     )
 
-    raw = resp.choices[0].message.content or ""
-    raw = raw.strip()
-    if raw.startswith("```"):
-        raw = raw.split("\n", 1)[1].rsplit("```", 1)[0]
+    raw = (resp.choices[0].message.content or "").strip()
 
     try:
         scaffold = json.loads(raw)
