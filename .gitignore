@@ -40,5 +40,11 @@ yarn-error.log*
 # selectively if you want them visible publicly)
 proposals/
 
+# Blog generation outputs
+docs/blog/previews/
+docs/blog/publish/
+docs/blog/assets/**/diagrams.html
+docs/blog/assets/**/puppeteer-config.json
+
 # OS
 Thumbs.db
