@@ -1,0 +1,47 @@
+flowchart LR
+    subgraph Frontend
+        T[Topic Explorer]
+        M[Mind Map]
+        E[Eval Dashboard]
+        C[Challenge Panel]
+        R[Research Panel]
+    end
+
+    subgraph Backend
+        API[FastAPI Routes]
+        ORCH[Agent Orchestration]
+        EVT[SSE Broadcasts]
+    end
+
+    subgraph Agents
+        TEACHER[Teacher]
+        STUDENT[Student]
+        EXAMINER[Examiner]
+    end
+
+    subgraph Data
+        PG[(Lakebase Postgres)]
+        AX[arXiv]
+        WS[Web Search]
+        MS[Databricks Model Serving]
+        GR[Guardrails]
+    end
+
+    T --> API
+    M --> API
+    E --> API
+    C --> API
+    R --> API
+    API --> ORCH
+    ORCH --> TEACHER
+    ORCH --> STUDENT
+    ORCH --> EXAMINER
+    TEACHER --> MS
+    STUDENT --> MS
+    EXAMINER --> MS
+    API --> PG
+    API --> AX
+    API --> WS
+    API --> GR
+    EVT --> T
+    EVT --> M

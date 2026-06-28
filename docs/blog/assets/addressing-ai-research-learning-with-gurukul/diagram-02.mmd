@@ -1,0 +1,10 @@
+flowchart TB
+    UI[React + Vite Frontend] --> API[FastAPI Agent Server]
+    API --> Agents[Teacher / Student / Examiner Agents]
+    Agents --> Models[Databricks Model Serving]
+    API --> DB[(Lakebase Postgres)]
+    API --> SSE[Server-Sent Events]
+    SSE --> UI
+    API --> Arxiv[arXiv Verification]
+    API --> Web[Web Search for Current Model Details]
+    API --> Guardrails[Content Guardrails]
