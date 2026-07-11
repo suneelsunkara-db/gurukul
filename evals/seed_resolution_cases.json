@@ -1,0 +1,21 @@
+[
+  {
+    "seed": "Qwen AgentWorld",
+    "expected_type": "specific_entity",
+    "must_match": ["Qwen-AgentWorld", "2606.24597"]
+  },
+  {
+    "seed": "RLHF and LLM",
+    "expected_type": "multi_seed",
+    "expected_parts": ["RLHF", "LLM"]
+  },
+  {
+    "seed": "transformer attention",
+    "expected_type": "general_concept"
+  },
+  {
+    "seed": "Qwen-AgentWorld and RLHF",
+    "expected_type": "multi_seed",
+    "expected_parts": ["Qwen-AgentWorld", "RLHF"]
+  }
+]

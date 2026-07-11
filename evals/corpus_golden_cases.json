@@ -1,0 +1,51 @@
+[
+  {
+    "query": "attention is all you need transformer",
+    "must_match": ["Attention Is All You Need"],
+    "match_mode": "exact"
+  },
+  {
+    "query": "Training language models to follow instructions with human feedback",
+    "must_match": ["Training language models to follow instructions with human feedback"],
+    "match_mode": "exact"
+  },
+  {
+    "query": "retrieval augmented generation knowledge intensive NLP",
+    "must_match": ["Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks"],
+    "match_mode": "exact"
+  },
+  {
+    "query": "ReAct reasoning acting language models",
+    "must_match": ["ReAct: Synergizing Reasoning and Acting in Language Models"],
+    "match_mode": "exact"
+  },
+  {
+    "query": "Toolformer language models use tools",
+    "must_match": ["Toolformer: Language Models Can Teach Themselves to Use Tools"],
+    "match_mode": "exact"
+  },
+  {
+    "query": "FlashAttention fast exact attention IO aware",
+    "must_match": ["FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness"],
+    "match_mode": "exact"
+  },
+  {
+    "query": "LoRA low rank adaptation large language models",
+    "must_match": ["LoRA: Low-Rank Adaptation of Large Language Models"],
+    "match_mode": "exact"
+  },
+  {
+    "query": "constitutional AI harmlessness from AI feedback",
+    "must_match": ["Constitutional AI: Harmlessness from AI Feedback"],
+    "match_mode": "exact"
+  },
+  {
+    "query": "mixture of experts large language models Mixtral",
+    "must_match": ["Mixtral", "Mixture of Experts"]
+  },
+  {
+    "query": "Qwen technical report large language model",
+    "must_match": ["Qwen"]
+  }
+]
+

@@ -60,7 +60,7 @@ fi
 ok "Workspace: $DATABRICKS_HOST"
 
 PROFILE_ARG=""
-[ -n "${DATABRICKS_CONFIG_PROFILE:-}" ] && PROFILE_ARG="--profile $DATABRICKS_CONFIG_PROFILE"
+[ -n "${DATABRICKS_CONFIG_PROFILE:-}" ] && PROFILE_ARG="-p $DATABRICKS_CONFIG_PROFILE"
 
 if ! databricks auth token --host "$DATABRICKS_HOST" $PROFILE_ARG >/dev/null 2>&1; then
     warn "Not authenticated. Launching browser login..."
@@ -123,6 +123,16 @@ else
     warn "TAVILY_API_KEY not set in .env — web search will be disabled"
 fi
 
+# Store the Semantic Scholar API key (used for corpus + seed-resolution candidates)
+if [ -n "${S2_API_KEY:-}" ]; then
+    databricks secrets put-secret "$SCOPE" s2_api_key \
+        --string-value "$S2_API_KEY" $PROFILE_ARG >/dev/null 2>&1 \
+        && ok "Stored s2_api_key in scope '$SCOPE'" \
+        || warn "Failed to store s2_api_key"
+else
+    warn "S2_API_KEY not set in .env — Semantic Scholar search will be skipped by strict grounding policy"
+fi
+
 # Ensure the app exists before attaching resources
 if ! databricks apps get "$APP_NAME" $PROFILE_ARG >/dev/null 2>&1; then
     log "Creating app '$APP_NAME'..."
@@ -135,6 +145,7 @@ fi
 # Lakebase paths derive from ENDPOINT_NAME to avoid duplicating config.
 PG_BRANCH="${ENDPOINT_NAME%/endpoints/*}"
 PG_DATABASE="${PG_BRANCH}/databases/databricks-postgres"
+EMBEDDING_MODEL="${EMBEDDING_MODEL:-gurukul-specter2-embed}"
 
 RESOURCES_JSON=$(mktemp)
 cat > "$RESOURCES_JSON" <<JSON
@@ -144,7 +155,9 @@ cat > "$RESOURCES_JSON" <<JSON
     {"name": "postgres", "postgres": {"branch": "${PG_BRANCH}", "database": "${PG_DATABASE}", "permission": "CAN_CONNECT_AND_CREATE"}},
     {"name": "teacher_llm", "serving_endpoint": {"name": "${TEACHER_MODEL}", "permission": "CAN_QUERY"}},
     {"name": "student_llm", "serving_endpoint": {"name": "${STUDENT_MODEL}", "permission": "CAN_QUERY"}},
-    {"name": "tavily-api-key", "secret": {"scope": "${SCOPE}", "key": "tavily_api_key", "permission": "READ"}}
+    {"name": "embedding_llm", "serving_endpoint": {"name": "${EMBEDDING_MODEL}", "permission": "CAN_QUERY"}},
+    {"name": "tavily-api-key", "secret": {"scope": "${SCOPE}", "key": "tavily_api_key", "permission": "READ"}},
+    {"name": "s2-api-key", "secret": {"scope": "${SCOPE}", "key": "s2_api_key", "permission": "READ"}}
   ]
 }
 JSON
@@ -156,8 +169,11 @@ databricks apps update "$APP_NAME" --json "@$RESOURCES_JSON" $PROFILE_ARG >/dev/
 # ─── 6. Upload source code to workspace ─────────────────────────────
 step "6/8  Uploading source code"
 
-# Determine the workspace path for source code
-WS_PATH="/Workspace/Users/$(databricks current-user me $PROFILE_ARG -o json 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('userName',''))")/apps/${APP_NAME}"
+# Determine the workspace path for source code. Keep app source isolated from
+# serverless job artifacts under jobs-src; Databricks Apps exports the entire
+# source-code path recursively during deploy.
+WS_BASE="/Workspace/Users/$(databricks current-user me $PROFILE_ARG -o json 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('userName',''))")/apps/${APP_NAME}"
+WS_PATH="${WS_BASE}/app-src"
 
 log "Workspace path: $WS_PATH"
 
@@ -170,7 +186,6 @@ rsync -a --exclude='__pycache__' agent_server "$STAGING/"
 rsync -a --exclude='__pycache__' scripts "$STAGING/"
 rsync -a --exclude='__pycache__' evals "$STAGING/"
 cp pyproject.toml "$STAGING/"
-cp uv.lock "$STAGING/"
 cp app.yaml "$STAGING/"
 cp README.md "$STAGING/" 2>/dev/null || true
 
@@ -183,7 +198,9 @@ cp -r build "$STAGING/"
 log "Staging directory contents:"
 ls -la "$STAGING/" | tail -15
 
-# Upload to workspace (overwrite)
+# Upload to workspace. Delete the app source folder first so stale files such
+# as an old uv.lock do not remain in the deployment source.
+databricks workspace delete "$WS_PATH" --recursive $PROFILE_ARG 2>/dev/null || true
 databricks workspace mkdirs "$WS_PATH" $PROFILE_ARG 2>/dev/null || true
 databricks workspace import-dir "$STAGING" "$WS_PATH" --overwrite $PROFILE_ARG 2>&1
 ok "Source code uploaded to $WS_PATH"

@@ -58,13 +58,20 @@ class TopicRow:
     updated_at: datetime
 
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 10
 
 SCHEMA_SQL = f"""
 -- Gurukul schema v{SCHEMA_VERSION}
 -- Idempotent: safe to run on every startup.
 
 CREATE SCHEMA IF NOT EXISTS {SCHEMA};
+
+-- ── pgvector (dense embeddings for grounded retrieval) ──────────────
+-- The `vector` type backs corpus_papers.embedding. The lakebase_vector /
+-- lakebase_text extensions (ANN + BM25 index types) are installed by
+-- scripts/setup_search.sh with autocommit so a not-yet-enabled project
+-- can't abort this schema transaction. `vector` is always available.
+CREATE EXTENSION IF NOT EXISTS vector;
 
 -- ── Topics ──────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS {SCHEMA}.topics (
@@ -251,6 +258,59 @@ CREATE TABLE IF NOT EXISTS {SCHEMA}.judge_calibration (
     updated_at           TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- ── Grounded-retrieval corpus (scientific papers) ────────────────────
+-- Field-scoped corpus for seed resolution + Research Mentor novelty/
+-- coverage. embedding is SPECTER2 proximity (VECTOR(768)); tsv is
+-- title(A) + abstract(B). The lakebase_ann / lakebase_bm25 indexes are
+-- built by jobs/corpus_build.py AFTER bulk load (BM25 stats are computed
+-- at index-build time), not here.
+CREATE TABLE IF NOT EXISTS {SCHEMA}.corpus_papers (
+    corpus_id      BIGINT PRIMARY KEY,
+    arxiv_id       TEXT,
+    doi            TEXT,
+    title          TEXT NOT NULL,
+    abstract       TEXT,
+    authors        JSONB,
+    venue          TEXT,
+    year           INTEGER,
+    fields         TEXT[],
+    citation_count INTEGER NOT NULL DEFAULT 0,
+    references_ids BIGINT[],
+    url            TEXT,
+    source         TEXT NOT NULL DEFAULT 's2',
+    embedding      vector(768),
+    tsv            TSVECTOR,
+    ingested_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- ── Seed resolutions (transparency + threshold tuning) ───────────────
+-- One row per resolved seed: what it resolved to (entity/concept/unknown)
+-- and the evidence (top candidates, similarity distribution) behind it.
+CREATE TABLE IF NOT EXISTS {SCHEMA}.seed_resolutions (
+    id            SERIAL PRIMARY KEY,
+    seed          TEXT NOT NULL,
+    resolved_type TEXT NOT NULL,
+    entities      JSONB NOT NULL DEFAULT '[]'::jsonb,
+    evidence      JSONB NOT NULL DEFAULT '{{}}'::jsonb,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- ── Long-running job progress (serverless jobs) ─────────────────────
+-- Local shell scripts submit long-running work to Databricks Jobs; the
+-- remote job writes progress here so failures are resumable and visible.
+CREATE TABLE IF NOT EXISTS {SCHEMA}.long_running_jobs (
+    run_id        TEXT PRIMARY KEY,
+    job_type      TEXT NOT NULL,
+    status        TEXT NOT NULL DEFAULT 'queued',
+    step          TEXT NOT NULL DEFAULT '',
+    progress      REAL NOT NULL DEFAULT 0,
+    detail        JSONB NOT NULL DEFAULT '{{}}'::jsonb,
+    error         TEXT,
+    started_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    completed_at  TIMESTAMPTZ
+);
+
 -- ── Indexes ─────────────────────────────────────────────────────────
 CREATE INDEX IF NOT EXISTS idx_annotations_user_type
     ON {SCHEMA}.annotations(user_id, annotation_type);
@@ -270,6 +330,14 @@ CREATE INDEX IF NOT EXISTS idx_misconceptions_active
     ON {SCHEMA}.misconceptions(user_id) WHERE resolved_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_research_user
     ON {SCHEMA}.research_directions(user_id);
+CREATE INDEX IF NOT EXISTS idx_corpus_year
+    ON {SCHEMA}.corpus_papers(year);
+CREATE INDEX IF NOT EXISTS idx_corpus_arxiv
+    ON {SCHEMA}.corpus_papers(arxiv_id);
+CREATE INDEX IF NOT EXISTS idx_seed_resolutions_seed
+    ON {SCHEMA}.seed_resolutions(seed);
+CREATE INDEX IF NOT EXISTS idx_long_jobs_type_updated
+    ON {SCHEMA}.long_running_jobs(job_type, updated_at DESC);
 
 -- ── Migrations (upgrade existing tables to current schema) ──────────
 -- Each block is guarded so it's safe to re-run.
@@ -678,6 +746,27 @@ class GurukuDB:
             await conn.execute(
                 f"INSERT INTO {SCHEMA}.explorations (seed, parent_id) VALUES (%s, %s)",
                 (seed, parent_id),
+            )
+            await conn.commit()
+
+    async def save_seed_resolution(
+        self,
+        *,
+        seed: str,
+        resolved_type: str,
+        entities: list[dict],
+        evidence: dict,
+    ) -> None:
+        """Persist resolver evidence for transparency and threshold tuning."""
+        pool = await self._pool()
+        async with pool.connection() as conn:
+            await conn.execute(
+                f"""
+                INSERT INTO {SCHEMA}.seed_resolutions
+                    (seed, resolved_type, entities, evidence)
+                VALUES (%s, %s, %s::jsonb, %s::jsonb)
+                """,
+                (seed, resolved_type, json.dumps(entities), json.dumps(evidence)),
             )
             await conn.commit()
 

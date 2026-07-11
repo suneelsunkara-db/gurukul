@@ -4,8 +4,42 @@
 **Version**: v4.0  
 **Author**: Suneel Sunkara  
 **Status**: Draft  
-**Last Updated**: 2026-06-20  
+**Last Updated**: 2026-07-05  
 **Supersedes**: PRD-conceptual-connections-learning-engine.md (v3.0)
+
+---
+
+## Implementation Alignment: Current System Architecture
+
+The current implementation has moved from a standalone learning pipeline into an evidence-grounded Databricks App architecture. See [`ARCHITECTURE.md`](ARCHITECTURE.md) for the full system and data flow.
+
+### Runtime Architecture
+
+```text
+React/Vite UI
+  -> FastAPI + SSE + MLflow AgentServer
+  -> Seed Resolver
+  -> Teacher Agent
+  -> Student Agents
+  -> Quality Gate
+  -> Lakebase Postgres
+```
+
+The product pipeline still follows Explore -> Assess -> Synthesize -> Identify -> Write, but every stage now depends on a shared substrate:
+
+- **Grounded seed resolution**: `strict_scholarly` policy resolves seeds with Lakebase corpus, arXiv, and Semantic Scholar before Teacher decomposition.
+- **Teacher/Student generation**: `databricks-gpt-5-5` maps topics and typed edges; `databricks-claude-sonnet-4-6` writes chapters, deepens thin content, and powers challenge/eval flows.
+- **Quality gate before assessment**: Generated content must pass structure, references, claim, and source-evidence checks. High-severity issues trigger repair; remaining unsupported claims are redacted before publication.
+- **Learning and research state in Lakebase**: Challenge sessions, MCQs, misconceptions, eval runs, quality learnings, research directions, and paper scaffolds are persisted in the same Lakebase schema as the knowledge graph.
+- **Offline corpus jobs**: Serverless jobs deploy the SPECTER2 endpoint and build the local scholarly corpus used for seed resolution and research grounding.
+
+### Architecture Implication For This PRD
+
+The PRD requirements should be read as product behavior on top of this architecture, not as separate features. In particular:
+
+- MCQs and Socratic challenges are generated from already-published topic payloads, so they inherit the content-quality gate.
+- Research directions must use grounded open problems, graph topology, and demonstrated competence. They should not invent novelty claims without evidence.
+- Paper scaffolds are readiness artifacts, not publication-ready papers; they must preserve source boundaries and call out where external validation is still required.
 
 ---
 

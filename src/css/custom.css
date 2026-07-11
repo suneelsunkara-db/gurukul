@@ -6,6 +6,7 @@
   --gk-font: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   --gk-accent: #6366f1;
   --gk-accent-dark: #4f46e5;
+  --gk-danger: #dc2626;
   --gk-bg: #ffffff;
   --gk-bg-surface: #f9fafb;
   --gk-text: #1f2937;
@@ -17,6 +18,7 @@
 [data-theme='dark'] {
   --gk-accent: #a5b4fc;
   --gk-accent-dark: #818cf8;
+  --gk-danger: #f87171;
   --gk-bg: #111827;
   --gk-bg-surface: #1f2937;
   --gk-text: #f3f4f6;
@@ -285,6 +287,23 @@ h1, h2, h3 { margin: 0 0 0.5rem; }
 
 .gk-sidebar__go:disabled {
   opacity: 0.4;
+  cursor: default;
+}
+
+.gk-sidebar__stop {
+  font-family: inherit;
+  font-size: 0.8rem;
+  font-weight: 600;
+  padding: 0.4rem 0.7rem;
+  border: 1px solid var(--gk-danger);
+  border-radius: 0 5px 5px 0;
+  background: var(--gk-danger);
+  color: #fff;
+  cursor: pointer;
+}
+
+.gk-sidebar__stop:disabled {
+  opacity: 0.55;
   cursor: default;
 }
 

@@ -63,7 +63,7 @@ log "Validating Databricks authentication..."
 
 PROFILE_ARG=""
 if [ -n "${DATABRICKS_CONFIG_PROFILE:-}" ]; then
-    PROFILE_ARG="--profile $DATABRICKS_CONFIG_PROFILE"
+    PROFILE_ARG="-p $DATABRICKS_CONFIG_PROFILE"
 fi
 
 if ! databricks auth token --host "$DATABRICKS_HOST" $PROFILE_ARG >/dev/null 2>&1; then

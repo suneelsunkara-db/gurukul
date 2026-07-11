@@ -31,9 +31,11 @@ export default function ExplorePage() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [payload, setPayload] = useState<TopicPayload | null>(null);
   const [loadingPayload, setLoadingPayload] = useState(false);
+  const [payloadError, setPayloadError] = useState<string | null>(null);
   const [progressMap, setProgressMap] = useState<Record<string, string>>({});
   const [seedInput, setSeedInput] = useState('');
   const [exploring, setExploring] = useState(false);
+  const [stoppingExplore, setStoppingExplore] = useState(false);
   const [connected, setConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [level, setLevel] = useState<ContentLevel>('intermediate');
@@ -137,6 +139,7 @@ export default function ExplorePage() {
 
       es.addEventListener('explore:done', () => {
         setExploring(false);
+        setStoppingExplore(false);
         setSelectedId((prev) => {
           if (prev) return prev;
           setGraph((g) => {
@@ -160,6 +163,7 @@ export default function ExplorePage() {
       es.addEventListener('error', (e) => {
         try { setError(JSON.parse((e as MessageEvent).data).message); } catch {}
         setExploring(false);
+        setStoppingExplore(false);
       });
 
       es.onerror = () => {
@@ -188,6 +192,8 @@ export default function ExplorePage() {
   const selectTopic = useCallback(async (id: string) => {
     setSelectedId(id);
     setRightView('topic');
+    setPayload(null);
+    setPayloadError(null);
     setReadSet((prev) => new Set([...prev, id]));
 
     const cached = payloadCache.current.get(id);
@@ -201,10 +207,21 @@ export default function ExplorePage() {
     try {
       const res = await fetch(`/api/topic/${id}`);
       if (!res.ok) throw new Error(`${res.status}`);
-      const data = (await res.json()).payload;
+      const body = await res.json();
+      const data = body.payload ? normalizeTopicPayload(body.payload) : null;
       setPayload(data);
       if (data) payloadCache.current.set(id, data);
-    } catch { setPayload(null); }
+      else {
+        setPayloadError(
+          body.status && body.status !== 'done'
+            ? `Topic is ${body.status}. Content is not ready yet.`
+            : 'This topic is marked done, but no content payload was returned.'
+        );
+      }
+    } catch (err) {
+      setPayload(null);
+      setPayloadError(`Could not load topic content: ${(err as Error).message}`);
+    }
     setLoadingPayload(false);
   }, []);
 
@@ -238,6 +255,17 @@ export default function ExplorePage() {
     setSeedInput('');
   };
 
+  const handleStopExplore = useCallback(async () => {
+    setStoppingExplore(true);
+    try {
+      const res = await fetch('/api/explore/cancel', {method: 'POST'});
+      if (!res.ok) throw new Error(await res.text());
+    } catch (err) {
+      setError((err as Error).message);
+      setStoppingExplore(false);
+    }
+  }, []);
+
   const handleExploreDeeper = useCallback((direction: string) => {
     if (selectedId) explore(direction, selectedId);
   }, [selectedId, explore]);
@@ -259,6 +287,10 @@ export default function ExplorePage() {
 
   const hasTopics = Object.keys(graph.nodes).length > 0;
   const selectedNode = selectedId ? graph.nodes[selectedId] : null;
+  const hasActiveGeneration = Object.values(graph.nodes).some(
+    (node) => node.status === 'queued' || node.status === 'generating'
+  );
+  const canStopExplore = exploring || hasActiveGeneration;
   const activeThoughts = thoughts.filter((t) => Date.now() - t.timestamp < 120_000);
 
   // ── Admin actions ──────────────────────────────────────────
@@ -318,12 +350,19 @@ export default function ExplorePage() {
               value={seedInput}
               onChange={(e) => setSeedInput(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && handleSeedSubmit()}
-              disabled={exploring}
+              disabled={canStopExplore}
             />
-            <button type="button" className="gk-sidebar__go"
-              onClick={handleSeedSubmit}
-              disabled={!seedInput.trim() || exploring}
-            >{exploring ? '...' : 'Go'}</button>
+            {canStopExplore ? (
+              <button type="button" className="gk-sidebar__stop"
+                onClick={handleStopExplore}
+                disabled={stoppingExplore}
+              >{stoppingExplore ? '...' : 'Stop'}</button>
+            ) : (
+              <button type="button" className="gk-sidebar__go"
+                onClick={handleSeedSubmit}
+                disabled={!seedInput.trim()}
+              >Go</button>
+            )}
           </div>
 
           {hasTopics && (
@@ -486,6 +525,26 @@ export default function ExplorePage() {
             <div className="gk-status-card"><div className="gk-pulse" /></div>
           )}
 
+          {rightView === 'topic' && selectedNode && selectedNode.status === 'done' && !payload && !loadingPayload && (
+            <div className="gk-status-card">
+              <div className="gk-card__label">Content unavailable</div>
+              <h3>{selectedNode.title}</h3>
+              <p style={{color: 'var(--gk-muted)'}}>
+                {payloadError ?? 'This topic is marked complete, but its generated content is missing.'}
+              </p>
+              <button
+                type="button"
+                className="gk-button"
+                onClick={() => {
+                  payloadCache.current.delete(selectedNode.id);
+                  selectTopic(selectedNode.id);
+                }}
+              >
+                Retry loading
+              </button>
+            </div>
+          )}
+
           {rightView === 'topic' && selectedNode && selectedNode.status === 'done' && payload && !loadingPayload && (
             <TopicContent
               node={selectedNode}
@@ -501,4 +560,25 @@ export default function ExplorePage() {
         </section>
       </main>
   );
+}
+
+function normalizeTopicPayload(raw: any): TopicPayload {
+  return {
+    summary: typeof raw?.summary === 'string' ? raw.summary : '',
+    takeaway: typeof raw?.takeaway === 'string' ? raw.takeaway : '',
+    eli5: typeof raw?.eli5 === 'string' ? raw.eli5 : '',
+    key_aspects: Array.isArray(raw?.key_aspects) ? raw.key_aspects : [],
+    gists: Array.isArray(raw?.gists) ? raw.gists : [],
+    open_problems: Array.isArray(raw?.open_problems) ? raw.open_problems : [],
+    references: Array.isArray(raw?.references) ? raw.references : [],
+    experiment: raw?.experiment && typeof raw.experiment === 'object'
+      ? {
+          title: typeof raw.experiment.title === 'string' ? raw.experiment.title : '',
+          hypothesis: typeof raw.experiment.hypothesis === 'string' ? raw.experiment.hypothesis : '',
+          steps: Array.isArray(raw.experiment.steps) ? raw.experiment.steps : [],
+        }
+      : null,
+    model_comparison: raw?.model_comparison ?? null,
+    connections: Array.isArray(raw?.connections) ? raw.connections : [],
+  };
 }

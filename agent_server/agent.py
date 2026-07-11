@@ -20,7 +20,6 @@ from uuid import uuid4
 
 import mlflow
 from agents import Agent, ModelSettings, Runner, function_tool, set_default_openai_api, set_default_openai_client
-from databricks_openai import AsyncDatabricksOpenAI
 from mlflow.genai.agent_server import invoke, stream
 from mlflow.types.responses import (
     ResponsesAgentRequest,
@@ -29,12 +28,14 @@ from mlflow.types.responses import (
 )
 
 from agent_server.db import GurukuDB
-from agent_server.guardrails import sanitize_payload, validate_examiner_output
+from agent_server.guardrails import redact_unsupported_claims, sanitize_payload, validate_examiner_output
+from agent_server.llm_client import async_databricks_openai
 from agent_server.prompts import (
     BRANCH_PROMPT,
     CATEGORIES,
     DECOMPOSE_PROMPT,
     DEEPEN_SYSTEM,
+    QUALITY_REPAIR_SYSTEM,
     SCHEMA_HINT_TOPIC,
     STUDENT_SYSTEM,
     TEACHER_SYSTEM,
@@ -44,12 +45,13 @@ from agent_server.schemas import (
     TOPIC_CONTENT_SCHEMA,
     response_format,
 )
+from agent_server.seed_resolver import format_grounding_context, resolve_seed
 from agent_server.sse import broadcast
 from agent_server.utils import extract_json, get_session_id, process_agent_stream_events
 
 logger = logging.getLogger(__name__)
 
-set_default_openai_client(AsyncDatabricksOpenAI())
+set_default_openai_client(async_databricks_openai())
 set_default_openai_api("chat_completions")
 
 mlflow.openai.autolog(log_traces=True)
@@ -113,6 +115,7 @@ async def do_decompose(seed: str, parent_id: str | None = None) -> str:
     current_year = date.today().year
 
     model_context_task = asyncio.create_task(_get_model_context())
+    resolution_task = asyncio.create_task(resolve_seed(seed))
 
     graph_state = await db.get_graph_state()
     existing = [
@@ -121,6 +124,43 @@ async def do_decompose(seed: str, parent_id: str | None = None) -> str:
     ]
 
     model_context = await model_context_task
+    resolution: dict | None = None
+    grounding_context = ""
+    try:
+        resolution = await resolution_task
+        grounding_context = format_grounding_context(resolution)
+        for part in resolution.get("parts", []):
+            try:
+                await db.save_seed_resolution(
+                    seed=part.get("seed") or seed,
+                    resolved_type=part.get("resolved_type") or "unknown",
+                    entities=part.get("entities") or [],
+                    evidence=part.get("evidence") or {},
+                )
+            except Exception as e:
+                logger.warning("Could not persist seed resolution for %r: %s", seed, e)
+
+        summary = []
+        for part in resolution.get("parts", []):
+            candidates = (part.get("evidence") or {}).get("top_candidates", [])
+            top = candidates[0].get("title") if candidates else "no paper match"
+            summary.append(f"{part.get('seed')} -> {part.get('resolved_type')} ({top})")
+        broadcast("thought", {
+            "step": "seed_resolution",
+            "message": "Resolved seed intent: " + "; ".join(summary),
+            "resolution": resolution,
+        })
+    except Exception as e:
+        logger.exception("Seed resolution failed for %r", seed)
+        broadcast("thought", {
+            "step": "seed_resolution_failed",
+            "message": f"Seed resolution failed for '{seed}': {type(e).__name__}: {e}",
+        })
+        return json.dumps({
+            "error": "seed_resolution_failed",
+            "message": str(e),
+            "seed": seed,
+        })
 
     is_branch = parent_id is not None
     parent_title = None
@@ -139,6 +179,8 @@ async def do_decompose(seed: str, parent_id: str | None = None) -> str:
             f'Parent topic: "{parent_title}"',
             f'Exploration direction: "{seed}"',
             "",
+            grounding_context,
+            "",
             "Existing topics in the knowledge graph:",
             "\n".join(f"- [{t['category']}] {t['title']} ({t['id']})" for t in existing) if existing else "(none)",
             "",
@@ -147,6 +189,8 @@ async def do_decompose(seed: str, parent_id: str | None = None) -> str:
     else:
         prompt_parts = [
             f'Seed topic: "{seed}"',
+            "",
+            grounding_context,
             "",
             "Existing topics in the knowledge graph:",
             "\n".join(f"- [{t['category']}] {t['title']} ({t['id']})" for t in existing) if existing else "(none)",
@@ -317,6 +361,8 @@ async def do_generate_topic_content(topic_id: str, quality_hint: str | None = No
         user_parts.append(f'\nTopics already covered:\n- {chr(10).join("- " + t for t in prior_topics)}')
     arxiv_context = ""
     web_context = ""
+    source_titles: list[str] = []
+    source_evidence: list[str] = []
 
     broadcast("thought", {
         "step": "web_arxiv_fetch",
@@ -349,6 +395,8 @@ async def do_generate_topic_content(topic_id: str, quality_hint: str | None = No
                     url = r.get("url", "")
                     if title:
                         web_lines.append(f"  - {title}: {content} (Source: {url})")
+                        source_titles.append(title)
+                        source_evidence.append(f"{title}. {content}")
                 web_context = "\n".join(web_lines)
             broadcast("thought", {
                 "step": "web_search_done",
@@ -357,12 +405,16 @@ async def do_generate_topic_content(topic_id: str, quality_hint: str | None = No
             })
 
         if arxiv_papers:
-            arxiv_lines = ["\n[ARXIV PAPERS — verified research publications]:"]
+            arxiv_lines = ["\n[ARXIV PAPERS — verified research publications with abstract snippets]:"]
             for p in arxiv_papers:
+                summary = (p.summary or "").strip()
                 arxiv_lines.append(
                     f'  - "{p.title}" by {", ".join(p.authors[:3])} '
                     f"({p.year}) arXiv:{p.arxiv_id}"
+                    + (f"\n    Abstract: {summary[:700]}" if summary else "")
                 )
+                source_titles.append(p.title)
+                source_evidence.append(f"{p.title}. {summary}")
             arxiv_context = "\n".join(arxiv_lines)
             broadcast("thought", {
                 "step": "arxiv_fetch",
@@ -539,7 +591,12 @@ async def do_generate_topic_content(topic_id: str, quality_hint: str | None = No
                     "message": f"Downgraded {downgraded} comparison cells without source attribution",
                 })
 
-        payload, guardrail_issues = sanitize_payload(payload)
+        payload, guardrail_issues = sanitize_payload(
+            payload,
+            topic_title=topic["title"],
+            source_titles=source_titles,
+            source_evidence=source_evidence,
+        )
         if guardrail_issues:
             high_issues = [i for i in guardrail_issues if i["severity"] == "high"]
             med_issues = [i for i in guardrail_issues if i["severity"] == "medium"]
@@ -555,6 +612,90 @@ async def do_generate_topic_content(topic_id: str, quality_hint: str | None = No
                            f"Auto-fixed where possible.",
                 "issues": [i["message"] for i in guardrail_issues[:5]],
             })
+
+            if high_issues:
+                broadcast("thought", {
+                    "step": "quality_repair_start",
+                    "topic_id": topic_id,
+                    "message": f"Quality gate found {len(high_issues)} high-severity evidence issues; repairing before publish...",
+                    "issues": [i["message"] for i in high_issues[:5]],
+                })
+                repairer = Agent(
+                    name="EvidenceRepairer",
+                    instructions=QUALITY_REPAIR_SYSTEM,
+                    model=STUDENT_MODEL,
+                    model_settings=ModelSettings(extra_body={
+                        "response_format": response_format(
+                            "topic_content", TOPIC_CONTENT_SCHEMA),
+                    }) if not topic["is_comparison"] else ModelSettings(),
+                )
+                repair_prompt = "\n".join([
+                    f'Topic: "{topic["title"]}"',
+                    "Source evidence available to the writer:",
+                    arxiv_context or "(no arXiv evidence)",
+                    web_context[:3000] or "(no web evidence)",
+                    "",
+                    "Quality-gate findings:",
+                    "\n".join(f"- {i['message']}" for i in high_issues[:8]),
+                    "",
+                    "Draft JSON:",
+                    json.dumps(payload, indent=2)[:9000],
+                    "",
+                    "Return the complete repaired JSON only.",
+                ])
+                repair_result = await Runner.run(
+                    repairer,
+                    input=[{"role": "user", "content": repair_prompt}],
+                )
+                repair_text = ""
+                for item in repair_result.new_items:
+                    if hasattr(item, "text"):
+                        repair_text = item.text
+                        break
+                    raw_item = item.to_input_item()
+                    if isinstance(raw_item, dict) and raw_item.get("type") == "message":
+                        for c in raw_item.get("content", []):
+                            if isinstance(c, dict) and c.get("type") == "output_text":
+                                repair_text = c.get("text", "")
+                                break
+                repaired_payload = extract_json(repair_text)
+                payload, guardrail_issues = sanitize_payload(
+                    repaired_payload,
+                    topic_title=topic["title"],
+                    source_titles=source_titles,
+                    source_evidence=source_evidence,
+                )
+                remaining_high = [i for i in guardrail_issues if i["severity"] == "high"]
+                if remaining_high:
+                    payload = redact_unsupported_claims(payload, remaining_high)
+                    payload, guardrail_issues = sanitize_payload(
+                        payload,
+                        topic_title=topic["title"],
+                        source_titles=source_titles,
+                        source_evidence=source_evidence,
+                    )
+                    remaining_high = [i for i in guardrail_issues if i["severity"] == "high"]
+                    if remaining_high:
+                        raise ValueError(
+                            "Content quality gate failed after repair/redaction: "
+                            + "; ".join(i["message"] for i in remaining_high[:3])
+                        )
+                    broadcast("thought", {
+                        "step": "quality_redaction_done",
+                        "topic_id": topic_id,
+                        "message": "Unsupported specific claims were redacted before publishing.",
+                    })
+                broadcast("thought", {
+                    "step": "quality_repair_done",
+                    "topic_id": topic_id,
+                    "message": "Quality repair passed; publishing evidence-aligned content.",
+                })
+
+        payload["_quality"] = {
+            "policy": "repair_then_redact_unsupported_claims",
+            "evidence_titles": source_titles[:12],
+            "evidence_snippets": source_evidence[:12],
+        }
 
         await db.store_payload(topic_id, payload)
 

@@ -67,6 +67,12 @@ The topics should COVER THE FIELD, not just be sequential subtopics. Include:
 - Specific model families with their LATEST frontier versions as of {current_date}
 - How concepts connect across categories
 
+If a SEED RESOLUTION / GROUNDING CONTEXT block is provided:
+- For a specific_entity route, anchor the map around the resolved paper/entity and its real context.
+- For a general_concept route, cover the broader field rather than treating the seed as one paper.
+- For a multi_seed route, allocate meaningful coverage to EACH seed part; do not bias toward the first part.
+- For an unresolved route, do not invent a paper/entity for that seed part.
+
 For model families, use the LATEST generation available:
 {model_context}
 
@@ -232,6 +238,8 @@ Content rules:
 
 GROUNDING AND ACCURACY (critical):
 - Every factual claim MUST be attributable to a published paper, technical report, or official documentation. If you cannot name the source, do not state the claim as fact.
+- Treat the provided source block as the evidence boundary. Do not add model sizes, benchmark results, dataset details, training claims, release dates, or empirical results unless they appear in that source block or are cited inline to a reference.
+- If only a title/reference is provided without abstract-level evidence, restrict yourself to title-level and high-level context. Say that detailed architecture, dataset, and benchmark claims require reading the paper.
 - NEVER invent paper titles, author names, or arXiv IDs. Only cite papers you are certain exist. Omit the reference entirely if unsure.
 - NEVER fabricate benchmark numbers, parameter counts, or performance metrics. If you don't know the exact number, say "approximately" or "on the order of" with a range, or omit.
 - Use EPISTEMIC MARKERS on every claim:
@@ -342,6 +350,20 @@ Also check:
 - Does the takeaway state both importance AND limitation?
 
 Return the COMPLETE improved JSON (same schema as input). Do NOT remove existing content — only add depth."""
+
+
+QUALITY_REPAIR_SYSTEM = """You are a research-content evidence auditor and repairer.
+
+You receive a generated chapter, the source evidence that was available to the writer, and deterministic quality-gate findings.
+
+Your job:
+1. Remove or hedge every specific claim that is not directly supported by the evidence.
+2. Remove weakly related references. Keep fewer references if that is more honest.
+3. Do not add new facts unless they are present in the evidence block.
+4. If evidence is thin, say so explicitly in the summary/takeaway and keep the chapter useful at the conceptual level.
+5. Preserve the same JSON schema and return the complete repaired JSON only.
+
+Specific claims include model sizes, benchmark numbers, training data/objectives, release dates, empirical improvements, transfer claims, and architecture details."""
 
 JUDGE_SYSTEM = """You are a research-quality content evaluator. You assess LLM-generated educational content for research paper preparation readiness.
 

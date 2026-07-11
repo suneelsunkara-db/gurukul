@@ -37,6 +37,18 @@ router = APIRouter(prefix="/api")
 db = GurukuDB()
 
 EXAMINER_MODEL = os.getenv("STUDENT_MODEL", "")
+_active_exploration_task: asyncio.Task | None = None
+
+
+async def _cancel_pending_topics() -> int:
+    graph = await db.get_graph_state()
+    cancelled = 0
+    for node in graph.get("nodes", {}).values():
+        if node.get("status") in {"queued", "generating"}:
+            await db.update_topic_status(node["id"], "failed", "Cancelled by user")
+            broadcast("status", {"id": node["id"], "status": "failed", "error": "Cancelled by user"})
+            cancelled += 1
+    return cancelled
 
 
 # ── SSE ─────────────────────────────────────────────────────────────
@@ -90,6 +102,10 @@ class ExploreRequest(BaseModel):
 async def explore(req: ExploreRequest):
     """Trigger exploration via the agent's decompose + generate functions."""
     from agent_server.agent import do_decompose, do_generate_all_queued
+    global _active_exploration_task
+
+    if _active_exploration_task and not _active_exploration_task.done():
+        raise HTTPException(409, "An exploration is already running. Stop it before starting another.")
 
     broadcast("thought", {
         "step": "explore_start",
@@ -97,18 +113,54 @@ async def explore(req: ExploreRequest):
     })
 
     async def run_exploration():
+        global _active_exploration_task
         try:
             await do_decompose(seed=req.seed, parent_id=req.parentId)
             await do_generate_all_queued()
+        except asyncio.CancelledError:
+            logger.info("Exploration cancelled for seed %r", req.seed)
+            await _cancel_pending_topics()
+            broadcast("thought", {
+                "step": "explore_cancelled",
+                "message": "Exploration stopped by user.",
+                "parentId": req.parentId,
+            })
+            broadcast("explore:done", {"parentId": req.parentId, "cancelled": True})
+            raise
         except Exception as e:
             logger.error("Explore error: %s", e, exc_info=True)
             broadcast("error", {
                 "message": f"Explore failed: {str(e)[:300]}",
                 "parentId": req.parentId,
             })
+        finally:
+            if asyncio.current_task() is _active_exploration_task:
+                _active_exploration_task = None
 
-    asyncio.create_task(run_exploration())
+    _active_exploration_task = asyncio.create_task(run_exploration())
     return {"ok": True, "seed": req.seed, "parentId": req.parentId}
+
+
+@router.post("/explore/cancel")
+async def cancel_explore():
+    """Stop the active exploration/generation run, if one is running."""
+    global _active_exploration_task
+    if not _active_exploration_task or _active_exploration_task.done():
+        cancelled_topics = await _cancel_pending_topics()
+        if cancelled_topics:
+            broadcast("thought", {
+                "step": "explore_cancelled",
+                "message": f"Stopped {cancelled_topics} queued/generating topic(s).",
+            })
+            broadcast("explore:done", {"cancelled": True})
+            return {"ok": True, "cancelled": True, "topics": cancelled_topics}
+        return {"ok": True, "cancelled": False, "message": "No active exploration"}
+    _active_exploration_task.cancel()
+    broadcast("thought", {
+        "step": "explore_cancel_requested",
+        "message": "Stopping active exploration...",
+    })
+    return {"ok": True, "cancelled": True}
 
 
 # ── Reset ───────────────────────────────────────────────────────────
@@ -1134,10 +1186,10 @@ async def _score_llm_judge(title: str, payload: dict) -> dict[str, tuple[float |
     """
     import asyncio as _aio
     import statistics
-    from databricks_openai import AsyncDatabricksOpenAI
+    from agent_server.llm_client import async_databricks_openai
     from agent_server.prompts import JUDGE_SYSTEM
 
-    client = AsyncDatabricksOpenAI()
+    client = async_databricks_openai()
 
     # The judge must evaluate the SAME content the reader sees — not a
     # truncated proxy. Earlier this view dropped gists/connections and capped
@@ -2890,7 +2942,7 @@ async def get_competence_map():
 @router.post("/research/directions")
 async def generate_research_directions():
     """Use the Teacher model to suggest research directions based on competence map."""
-    from databricks_openai import AsyncDatabricksOpenAI
+    from agent_server.llm_client import async_databricks_openai
     from agent_server.prompts import RESEARCH_DIRECTION_SYSTEM
 
     competence = await get_competence_map()
@@ -2949,7 +3001,7 @@ async def generate_research_directions():
     except Exception as e:
         logger.warning("arXiv fetch for research directions failed: %s", e)
 
-    client = AsyncDatabricksOpenAI()
+    client = async_databricks_openai()
     model = os.environ.get("TEACHER_MODEL", "databricks-claude-sonnet-4-6")
 
     resp = await client.chat.completions.create(
@@ -2979,7 +3031,7 @@ async def generate_research_directions():
 @router.post("/research/scaffold")
 async def generate_paper_scaffold(body: dict):
     """Generate a paper scaffold for a chosen research direction."""
-    from databricks_openai import AsyncDatabricksOpenAI
+    from agent_server.llm_client import async_databricks_openai
     from agent_server.prompts import PAPER_SCAFFOLD_SYSTEM
 
     direction = body.get("direction", {})
@@ -3004,7 +3056,7 @@ async def generate_paper_scaffold(body: dict):
                     continue
             context_parts.append(f"### {t['title']}\n{json.dumps(p)[:3000]}\n")
 
-    client = AsyncDatabricksOpenAI()
+    client = async_databricks_openai()
     model = os.environ.get("TEACHER_MODEL", "databricks-claude-sonnet-4-6")
 
     resp = await client.chat.completions.create(

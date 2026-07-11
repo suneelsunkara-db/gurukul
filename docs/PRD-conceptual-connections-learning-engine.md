@@ -4,7 +4,33 @@
 **Version**: v3.0  
 **Author**: Suneel Sunkara  
 **Status**: Draft  
-**Last Updated**: 2026-06-19
+**Last Updated**: 2026-07-05
+
+> Superseded by [`PRD-research-pipeline.md`](PRD-research-pipeline.md) for the unified product pipeline. This document remains useful for the Socratic assessment, misconception tracking, and research-readiness model.
+
+---
+
+## Current Architecture Context
+
+The assessment engine now runs inside the broader Gurukul Databricks App architecture described in [`ARCHITECTURE.md`](ARCHITECTURE.md).
+
+```text
+Topic payload
+  -> content quality gate
+  -> MCQ generation
+  -> Socratic challenge
+  -> misconception tracking
+  -> competence/readiness state
+  -> research directions and paper scaffolds
+```
+
+Key implementation constraints that update the original PRD:
+
+- **Assessments are downstream of grounded content**. MCQs and Socratic prompts should be generated from topic payloads that have passed the guardrail pipeline: schema checks, reference checks, claim/evidence alignment, repair, and redaction.
+- **Student model handles challenge generation in the current implementation**. The original PRD describes a distinct Examiner role; operationally, Examiner flows use the configured Student model endpoint unless separated later.
+- **Lakebase is the system of record**. `challenge_sessions`, `mcq_questions`, `mcq_responses`, `misconceptions`, `research_directions`, and `paper_scaffolds` coexist with the core knowledge graph and evaluation tables.
+- **Research readiness depends on grounded evidence**. The system should not surface paper ideas from competence alone; it also needs grounded open problems, typed graph relations, and explicit uncertainty where evidence is thin.
+- **SSE remains the interaction pattern**. Challenge generation, answer evaluation, graph changes, and repair/evaluation events should be visible as live thought/status updates.
 
 ---
 

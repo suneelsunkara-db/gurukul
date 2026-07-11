@@ -13,7 +13,7 @@ LLM research moves fast. Papers, architectures, and models evolve weekly. Guruku
 3. **Challenges** your understanding with Socratic assessment and MCQ quizzes (Examiner agent)
 4. **Evaluates** its own output for factual accuracy, grounding, and research quality (LLM-as-a-Judge)
 5. **Iteratively improves** weak content through an automated feedback loop
-6. **Grounds** model comparisons in real-time data via web search (Tavily) and verified papers (arXiv API)
+6. **Grounds** exploration in scholarly evidence via Lakebase corpus, arXiv, Semantic Scholar, and labeled Tavily freshness context
 7. **Guides** you from topic mastery to research paper scaffolding
 
 The end goal: go from "What is ReAct?" to a NeurIPS-ready paper outline, with every step validated.
@@ -21,69 +21,65 @@ The end goal: go from "What is ReAct?" to a NeurIPS-ready paper outline, with ev
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                        Gurukul UI (React + Vite)                │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌────────────────┐  │
-│  │ Topic    │  │ Mind Map │  │ Eval     │  │ Research Panel │  │
-│  │ Explorer │  │ (React   │  │ Dashboard│  │ (Competence →  │  │
-│  │ + Content│  │  Flow)   │  │          │  │  Directions →  │  │
-│  │          │  │          │  │          │  │  Paper Scaffold│  │
-│  └──────────┘  └──────────┘  └──────────┘  └────────────────┘  │
-└──────────────────────────┬──────────────────────────────────────┘
-                           │ /api/* (SSE + REST)
-┌──────────────────────────┴──────────────────────────────────────┐
-│                   FastAPI Agent Server (Python)                  │
+┌──────────────────┐
+│ React + Vite UI  │
+│ Explore, learn,  │
+│ compare, assess, │
+│ research         │
+└────────┬─────────┘
+         │ REST + SSE
+┌────────▼─────────────────────────────────────────────────────────┐
+│ Databricks App: FastAPI + MLflow AgentServer                     │
 │                                                                  │
-│  ┌──────────────────────────────────────────────────────────┐   │
-│  │  MLflow AgentServer (OpenAI Agents SDK)                  │   │
-│  │  ┌──────────┐  ┌──────────┐  ┌──────────┐               │   │
-│  │  │ Teacher  │  │ Student  │  │ Examiner │               │   │
-│  │  │ Agent    │  │ Agent    │  │ Agent    │               │   │
-│  │  │ (GPT-5.5)│  │ (Claude  │  │ (GPT-5.5)│               │   │
-│  │  │          │  │  Sonnet) │  │          │               │   │
-│  │  └──────────┘  └──────────┘  └──────────┘               │   │
-│  └──────────────────────────────────────────────────────────┘   │
-│                                                                  │
-│  ┌────────────┐  ┌────────────┐  ┌────────────┐                 │
-│  │ Eval Engine│  │ arXiv API  │  │ Tavily Web │                 │
-│  │ (Heuristic │  │ (Paper     │  │ Search     │                 │
-│  │ + LLM      │  │ Verify +   │  │ (Real-time │                 │
-│  │   Judge +  │  │ Discovery) │  │  Model     │                 │
-│  │ Calibrate) │  │            │  │  Specs)    │                 │
-│  └────────────┘  └────────────┘  └────────────┘                 │
-└──────────────────────────┬──────────────────────────────────────┘
-                           │
-              ┌────────────┴────────────┐
-              │  Lakebase (Managed      │
-              │  Postgres on Databricks)│
-              │                         │
-              │  • topics & payloads    │
-              │  • graph edges          │
-              │  • challenge sessions   │
-              │  • MCQ questions/answers│
-              │  • eval runs & actions  │
-              │  • quality learnings    │
-              │  • judge calibration    │
-              │  • misconceptions       │
-              └─────────────────────────┘
+│  Seed Resolver ──▶ Teacher Agent ──▶ Student Agents ──▶ Quality  │
+│  strict scholarly   topic graph       chapters + MCQs      Gate  │
+│  grounding          typed edges        repair/deepen        │     │
+└────────┬──────────────────────┬────────────────────────────▼─────┘
+         │                      │
+         │ evidence             │ model calls
+         ▼                      ▼
+┌──────────────────────────┐  ┌────────────────────────────────────┐
+│ Grounding Sources        │  │ Databricks Model Serving            │
+│ Lakebase corpus          │  │ teacher: databricks-gpt-5-5         │
+│ arXiv                    │  │ student: claude-sonnet-4-6          │
+│ Semantic Scholar         │  │ embed: gurukul-specter2-embed       │
+│ Tavily freshness search  │  └────────────────────────────────────┘
+└────────┬─────────────────┘
+         │ read/write
+         ▼
+┌──────────────────────────────────────────────────────────────────┐
+│ Lakebase Postgres                                                │
+│ topics, graph_edges, payloads, corpus_papers, seed_resolutions,  │
+│ challenges, MCQs, misconceptions, evals, quality learnings,      │
+│ research directions, paper scaffolds, long_running_jobs          │
+└──────────────────────────────────────────────────────────────────┘
+
+Serverless jobs build the offline retrieval layer:
+Semantic Scholar queries ─▶ corpus build ─▶ SPECTER2 embeddings ─▶
+Lakebase ANN/BM25 indexes ─▶ runtime seed retrieval.
 ```
+
+See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full system architecture and data flow.
 
 ### Agent Roles
 
 | Agent | Model | Role |
 |-------|-------|------|
-| **Teacher** | `databricks-gpt-5-5` | Decomposes questions into topic graphs, judges content quality, generates research directions |
-| **Student** | `databricks-claude-sonnet-4-6` | Generates deep, structured content for each topic with epistemic markers and references |
-| **Examiner** | `databricks-gpt-5-5` | Creates MCQ quizzes, runs Socratic assessment, identifies misconceptions |
+| **Teacher** | `databricks-gpt-5-5` | Decomposes grounded seeds into typed topic graphs and generates research directions |
+| **Student** | `databricks-claude-sonnet-4-6` | Generates chapters, deepens thin content, repairs quality issues, creates challenges/evals |
+| **Evidence Repairer** | `databricks-claude-sonnet-4-6` | Removes, hedges, or redacts unsupported claims before publication |
+| **Examiner flows** | `databricks-claude-sonnet-4-6` | Creates MCQ/Socratic assessments and identifies misconceptions from generated content |
 
 ### Data Sources
 
 | Source | Purpose | Integration |
 |--------|---------|-------------|
-| **Databricks FM Serving** | All LLM inference (content generation, evaluation, assessment) | `databricks-openai` SDK with unified OAuth auth |
-| **arXiv API** | Paper verification, reference discovery, recent paper search | `agent_server/arxiv.py` — batch verification, TTL cache |
-| **Tavily Web Search** | Real-time model specs for comparison chapters (beyond training cutoff) | `agent_server/web_search.py` — parallel family search |
-| **Lakebase (Postgres)** | All persistent state: topics, graphs, evals, challenges, learnings | `agent_server/db.py` — `psycopg` with OAuth token rotation |
+| **Databricks Model Serving** | Teacher, Student, and SPECTER2 embedding inference | Standard `openai.AsyncOpenAI` client pointed at Databricks serving endpoints via `agent_server/llm_client.py` |
+| **Lakebase corpus** | Primary local scholarly grounding source | `agent_server/grounding/sources/lakebase_corpus_source.py` over `corpus_papers` with SPECTER2 vectors and BM25 text |
+| **arXiv API** | Live scholarly metadata, abstract snippets, paper verification | `agent_server/arxiv.py` and `agent_server/grounding/sources/arxiv_source.py` |
+| **Semantic Scholar** | Live scholarly seed resolution and offline corpus ingestion | `agent_server/grounding/sources/semantic_scholar_source.py`, `jobs/corpus_build.py` |
+| **Tavily Web Search** | Fresh model-family context and comparison cells | `agent_server/web_search.py`; labeled freshness only, not a substitute for scholarly grounding |
+| **Lakebase Postgres** | Persistent graph, content, user learning, evals, corpus, job progress | `agent_server/db.py` with Databricks OAuth database credentials and async pooling |
 
 ### Evaluation Dimensions
 
@@ -118,18 +114,31 @@ gurukul/
 │   ├── db.py               # Lakebase (Postgres) data layer
 │   ├── prompts.py          # System prompts for all agents
 │   ├── schemas.py          # Strict JSON schemas for structured LLM outputs
+│   ├── llm_client.py       # OpenAI-compatible Databricks Model Serving client
+│   ├── grounding/          # Policy-driven seed resolution sources
+│   ├── corpus.py           # S2 corpus normalization, embedding, hybrid search
 │   ├── arxiv.py            # arXiv API client (search, verify, batch)
 │   ├── web_search.py       # Tavily web search for real-time model specs
 │   ├── guardrails.py       # Post-generation content validation
 │   ├── sse.py              # Server-Sent Events broadcast
 │   └── utils.py            # JSON extraction helpers
+├── jobs/                   # Serverless Databricks Jobs
+│   ├── deploy_specter2_job.py # Register SPECTER2 and create serving endpoint
+│   └── corpus_build.py     # Build S2 corpus, embed, index in Lakebase
+├── specter2/               # SPECTER2 pyfunc registration code
 ├── evals/                  # Evaluation harness
 │   ├── run_eval.py         # CLI: uv run gurukul-eval
+│   ├── content_audit.py    # Deterministic content quality audit
+│   ├── corpus_audit.py     # Corpus retrieval/index audit
 │   ├── scorers.py          # MLflow GenAI custom scorers
 │   └── datasets.py         # Eval dataset builders
 ├── scripts/
 │   ├── start_app.py        # Unified entry point (local + Databricks Apps)
-│   └── schema.sql          # Reference SQL schema for Lakebase tables
+│   ├── setup_search.sh     # Lakebase vector/search extension setup
+│   ├── deploy_specter2.sh  # Submit SPECTER2 endpoint job
+│   ├── build_corpus.sh     # Submit corpus build/index job
+│   ├── audit_content.sh    # Run deterministic content quality audit
+│   └── setup_secrets.sh    # Create/update Databricks secrets
 ├── src/                    # React frontend
 │   ├── pages/index.tsx     # Main page (SSE, routing, state)
 │   ├── components/         # 14 UI components
@@ -143,6 +152,7 @@ gurukul/
 │   │   └── ...             # Summary, KeyAspect, Experiment, etc.
 │   └── css/custom.css      # Styles
 ├── databricks.yml          # Databricks Asset Bundle config
+├── app.yaml                # Databricks Apps runtime command/env config
 ├── deploy.sh               # Zero-touch Databricks App deployment
 ├── setup.sh                # Interactive setup (local/deploy/eval)
 ├── .env.example            # Environment variable template
@@ -158,8 +168,10 @@ gurukul/
 - **Databricks CLI** — for authentication and deployment (`brew install databricks`)
 - **Databricks workspace** with:
   - Model serving endpoints (`databricks-gpt-5-5`, `databricks-claude-sonnet-4-6` or equivalents)
+  - SPECTER2 embedding serving endpoint (`gurukul-specter2-embed`)
   - Lakebase (Autoscaling Postgres) project with an endpoint
 - **Tavily API key** (free at [tavily.com](https://tavily.com)) — for real-time web search grounding
+- **Semantic Scholar API key** — for scholarly seed resolution and corpus ingestion
 
 ## Local Development Setup
 
@@ -178,6 +190,7 @@ DATABRICKS_CONFIG_PROFILE=your-profile
 
 TEACHER_MODEL=databricks-gpt-5-5
 STUDENT_MODEL=databricks-claude-sonnet-4-6
+EMBEDDING_MODEL=gurukul-specter2-embed
 
 PGHOST=your-lakebase-endpoint.database.us-east-1.cloud.databricks.com
 PGDATABASE=databricks_postgres
@@ -185,6 +198,7 @@ PGUSER=your.email@databricks.com
 ENDPOINT_NAME=projects/your-project/branches/production/endpoints/primary
 
 TAVILY_API_KEY=tvly-your-key-here
+S2_API_KEY=your-semantic-scholar-key
 
 AGENT_CONCURRENCY=6
 ```
@@ -247,22 +261,23 @@ The deploy script is zero-touch and handles everything in 8 steps:
 2. Loads `.env` and authenticates via Databricks CLI OAuth (launches login if needed)
 3. Builds the Vite frontend locally into `build/` (no npm runs on the platform)
 4. Sets up the Lakebase schema and grants permissions to all roles
-5. Creates the `gurukul` secret scope, stores `TAVILY_API_KEY`, and attaches all app resources (Postgres, Teacher/Student serving endpoints, secret)
-6. Uploads the staged source + pre-built frontend to the workspace
+5. Creates the `gurukul` secret scope, stores `TAVILY_API_KEY` and `S2_API_KEY`, and attaches all app resources (Postgres, Teacher/Student/SPECTER2 serving endpoints, secrets)
+6. Deletes and uploads a clean staged source + pre-built frontend to `/apps/gurukul/app-src`
 7. Deploys the app via `databricks apps deploy`
 8. Prints the live app URL
 
+The app source path is intentionally isolated from serverless job artifacts under `jobs-src`. Databricks Apps exports the source path recursively during deploy, so `deploy.sh` cleans `app-src` before upload to avoid stale files such as old `uv.lock` files or job artifacts affecting builds.
+
 ### Manual deployment (Databricks Asset Bundle)
 
-`databricks.yml` defines a single `prod` target (the default). The Tavily key is read from a secret scope, never passed inline:
+`databricks.yml` defines a single `prod` target (the default). API keys are read from a secret scope, never passed inline:
 
 ```bash
 uv sync && npm ci
 npm run build
 
-# one-time: create the secret scope the app references via valueFrom
-databricks secrets create-scope gurukul
-databricks secrets put-secret gurukul tavily_api_key --string-value "$TAVILY_API_KEY"
+# one-time: create/update the secret scope the app references via valueFrom
+./scripts/setup_secrets.sh
 
 databricks bundle validate
 databricks bundle deploy
@@ -284,16 +299,15 @@ databricks apps stop gurukul       # Stop the app
 | Package | Purpose |
 |---------|---------|
 | `fastapi` + `uvicorn` | Web framework and ASGI server |
-| `databricks-openai[memory]` | Databricks-native OpenAI client with unified auth |
-| `databricks-sdk` | Workspace API, Lakebase OAuth token generation |
+| `openai` | OpenAI-compatible client for Databricks Model Serving endpoints |
+| `databricks-sdk` | Workspace API, serving endpoint auth, Lakebase OAuth token generation |
 | `databricks-agents` + `databricks-ai-bridge[agent-server]` | Agent framework integration |
 | `mlflow >= 3.10` | Experiment tracking, GenAI evaluation, agent server |
 | `openai-agents` | OpenAI Agents SDK for Teacher/Student/Examiner orchestration |
 | `psycopg[binary,pool]` | PostgreSQL adapter with connection pooling (for Lakebase) |
-| `httpx` | Async HTTP client for arXiv API and Tavily web search |
+| `httpx` | Async HTTP client for arXiv, Semantic Scholar, and Tavily |
 | `sse-starlette` | Server-Sent Events for real-time UI updates |
 | `python-dotenv` | Environment variable loading |
-| `uuid-utils` | Fast UUID generation for topic/session IDs |
 | `opentelemetry-exporter-otlp-proto-grpc` | OTLP trace export for MLflow tracing |
 
 ### Node.js (managed by npm)
@@ -313,11 +327,16 @@ databricks apps stop gurukul       # Stop the app
 | `DATABRICKS_CONFIG_PROFILE` | Local only | `.env` | CLI auth profile name |
 | `TEACHER_MODEL` | Yes | `.env` + `databricks.yml` | Teacher/Judge model endpoint |
 | `STUDENT_MODEL` | Yes | `.env` + `databricks.yml` | Student model endpoint |
+| `EMBEDDING_MODEL` | Yes | `.env` + `databricks.yml` | SPECTER2 embedding endpoint for grounded retrieval |
 | `PGHOST` | Yes | `.env` + `databricks.yml` | Lakebase endpoint hostname |
 | `PGDATABASE` | Yes | `.env` + `databricks.yml` | Database name (default: `databricks_postgres`) |
 | `PGUSER` | Yes | `.env` + `databricks.yml` | Databricks email (local) or app client ID (deployed) |
 | `ENDPOINT_NAME` | Yes | `.env` + `databricks.yml` | Lakebase endpoint resource path |
 | `TAVILY_API_KEY` | Optional | `.env` + `databricks.yml` | Tavily API key for web search grounding |
+| `S2_API_KEY` | Yes for S2 | `.env` + `databricks.yml` | Semantic Scholar key for scholarly retrieval and corpus ingestion |
+| `S2_CORPUS_QUERIES` | Optional | `.env` | Semicolon-separated S2 search queries for corpus bootstrap |
+| `S2_LIMIT_PER_QUERY` | Optional | `.env` | Max S2 papers fetched per bootstrap query |
+| `EMBEDDING_BATCH_SIZE` | Optional | `.env` | Batch size for SPECTER2 corpus embedding job |
 | `AGENT_CONCURRENCY` | Optional | `.env` + `databricks.yml` | Max concurrent Student agents (default: 4) |
 | `JUDGE_SAMPLES` | Optional | `.env` | LLM-judge samples per dimension for self-consistency (default: 3) |
 | `MLFLOW_TRACKING_URI` | Optional | `databricks.yml` | MLflow tracking backend (set to `databricks` when deployed) |
@@ -325,13 +344,14 @@ databricks apps stop gurukul       # Stop the app
 
 ## How It Works
 
-1. **Explore** — Enter a seed question (e.g., "LLM Agent Patterns"). The Teacher agent decomposes it into a topic graph.
-2. **Learn** — Click any topic to read the Student-generated content: summaries, key aspects, experiments, references, and open problems.
+1. **Explore** — Enter a seed question. The policy-driven resolver grounds it against Lakebase corpus, arXiv, and Semantic Scholar before the Teacher agent decomposes it into a topic graph.
+2. **Learn** — Click any topic to read Student-generated content: summaries, key aspects, experiments, references, model comparisons, and open problems.
 3. **Visualize** — Switch to the Mind Map view to see how topics connect.
 4. **Challenge** — Take MCQ quizzes or start Socratic assessment to test your understanding.
-5. **Evaluate** — Open the Eval Dashboard to see quality scores across 8 dimensions, plus the judge's calibration status. Click Re-evaluate to run the full eval pipeline, or Run self-test to calibrate the judge.
-6. **Improve** — Click Apply Fix to regenerate weak topics with targeted quality hints. Learnings are only kept for calibrated dimensions with positive deltas, so improvement is tracked against a trusted signal.
-7. **Research** — Once you've mastered topics, open the Research Panel to discover research directions and generate paper scaffolds.
+5. **Validate** — Content passes schema, reference, claim, and source-evidence checks. High-severity issues trigger an EvidenceRepairer pass; remaining unsupported claims are redacted before publication.
+6. **Evaluate** — Open the Eval Dashboard to see quality scores across 8 dimensions, plus the judge's calibration status. Click Re-evaluate to run the full eval pipeline, or Run self-test to calibrate the judge.
+7. **Improve** — Click Apply Fix to regenerate weak topics with targeted quality hints. Learnings are only kept for calibrated dimensions with positive deltas, so improvement is tracked against a trusted signal.
+8. **Research** — Once you've mastered topics, open the Research Panel to discover research directions and generate paper scaffolds.
 
 ## License
 

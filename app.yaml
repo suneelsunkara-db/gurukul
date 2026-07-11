@@ -12,9 +12,13 @@ env:
     value: "databricks-gpt-5-5"
   - name: STUDENT_MODEL
     value: "databricks-claude-sonnet-4-6"
+  - name: EMBEDDING_MODEL
+    value: "gurukul-specter2-embed"
   - name: AGENT_CONCURRENCY
     value: "4"
   - name: TAVILY_API_KEY
     valueFrom: "tavily-api-key"
+  - name: S2_API_KEY
+    valueFrom: "s2-api-key"
   - name: LOG_LEVEL
     value: "INFO"
