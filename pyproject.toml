@@ -16,6 +16,7 @@ dependencies = [
   "psycopg[binary,pool]>=3.2.0",
   "sse-starlette>=2.0.0",
   "httpx>=0.28.0",
+  "databricks-openai>=0.15.0",
 ]
 
 [build-system]
